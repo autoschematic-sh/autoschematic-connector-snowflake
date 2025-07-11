@@ -1,5 +1,7 @@
 [package]
 name = "autoschematic-connector-snowflake"
+description = "An Autoschematic connector for Snowflake DDL resources"
+license = "MIT"
 version = "0.6.1"
 edition = "2024"
 
