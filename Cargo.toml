@@ -1,8 +1,8 @@
 [package]
 name = "autoschematic-connector-snowflake"
 description = "An Autoschematic connector for Snowflake DDL resources"
-license = "MIT"
-version = "0.6.1"
+license = "AGPL-3.0"
+version = "0.11.0"
 edition = "2024"
 
 [dependencies]
@@ -10,8 +10,8 @@ edition = "2024"
 tokio = { version = "1.45.0", features = ["rt-multi-thread"] }
 anyhow = "1.0.95"
 async-trait = "0.1.86"
-autoschematic-core = { path = "../../autoschematic/autoschematic-core", version = "0.6.1" }
-ron = { version = "0.10.1", features = ["indexmap"] }
+autoschematic-core = { path = "../../autoschematic/autoschematic-core", version = "0.11.0" }
+ron = { version = "0.12.0", features = ["indexmap"] }
 serde = { version = "1.0.217", features = ["derive"] }
 thiserror = "2.0.11"
 tracing = "0.1.41"
@@ -24,7 +24,7 @@ lazy_static = "1.5.0"
 serde_yaml = "0.9.34"
 walkdir = "2.5.0"
 indexmap = { version = "2.9.0", features = ["serde"] }
-snowflake-api = "0.12.0"
+snowflake-api = "0.14.0"
 base64 = "0.22.1"
-arrow = "55.1.0"
-sqlparser = "0.57.0"
+arrow = "57.0.0"
+sqlparser = "0.60.0"
