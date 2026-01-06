@@ -202,8 +202,7 @@ impl SnowflakeConnector {
         let QueryResult::Json(json_result) = api.exec(&format!("DESCRIBE USER \"{}\";", name)).await? else {
             return Ok(None);
         };
-        tracing::debug!("DESCRIBE USER {}: \"{}\"", name, json_result.value);
-
+        // tracing::debug!("DESCRIBE USER {}: \"{}\"", name, json_result.value);
         let mut user = SnowflakeUser {
             login_name: None,
             display_name: None,
@@ -224,7 +223,7 @@ impl SnowflakeConnector {
         for row in json_result.iter_records()? {
             let row = row?;
             let property: String = row.require_as("property")?;
-            let value: String = row.require_as("property_value")?;
+            let value: String = row.require_as("value")?;
 
             // Treat empty or "null" as None
             let value_opt = if value.is_empty() || value == "null" {
@@ -340,77 +339,39 @@ impl SnowflakeConnector {
             return Ok(None);
         }
 
-        // Get roles granted to this role using SHOW GRANTS TO ROLE
-        let mut granted_roles = IndexSet::new();
-        let grants_res = api.exec(&format!("SHOW GRANTS TO ROLE \"{}\";", name)).await;
-
-        match grants_res {
-            Ok(QueryResult::Json(json_result)) => {
-                for row in json_result.value.as_array().unwrap_or(&vec![]) {
-                    if let Some(row_arr) = row.as_array() {
-                        // SHOW GRANTS TO ROLE returns: created_on, privilege, granted_on, name, granted_to, grantee_name, grant_option, granted_by
-                        // We're looking for rows where privilege is "USAGE" and granted_on is "ROLE"
-                        let privilege = row_arr.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                        let granted_on = row_arr.get(2).and_then(|v| v.as_str()).unwrap_or("");
-                        let role_name = row_arr.get(3).and_then(|v| v.as_str()).unwrap_or("");
-
-                        if privilege == "USAGE" && granted_on == "ROLE" && !role_name.is_empty() {
-                            granted_roles.insert(role_name.to_string());
-                        }
-                    }
-                }
-            }
-            Ok(QueryResult::Arrow(arrow)) => {
-                for batch in &arrow {
-                    if batch.num_columns() >= 4 {
-                        let privilege_col: StringArray = batch.column(1).to_data().into();
-                        let granted_on_col: StringArray = batch.column(2).to_data().into();
-                        let name_col: StringArray = batch.column(3).to_data().into();
-
-                        for i in 0..batch.num_rows() {
-                            let privilege = privilege_col.value(i);
-                            let granted_on = granted_on_col.value(i);
-                            let role_name = name_col.value(i);
-
-                            if privilege == "USAGE" && granted_on == "ROLE" && !role_name.is_empty() {
-                                granted_roles.insert(role_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(QueryResult::Empty) => {}
-            Err(_) => {} // Ignore errors fetching grants, role still exists
-        }
+        // Get roles granted to this role using the ACCOUNT_USAGE catalog view
+        let granted_roles = Self::get_role_granted_roles(api, name).await?;
 
         Ok(Some(SnowflakeRole { comment, granted_roles }))
     }
 
-    async fn show_grants_on_object(api: &SnowflakeApi, object_type: &str, object_name: &str) -> Result<IndexSet<String>, anyhow::Error> {
-    }
-    /// Get roles granted to a user
+    /// Get roles granted to a user using the ACCOUNT_USAGE catalog view.
     async fn get_user_granted_roles(api: &SnowflakeApi, user_name: &str) -> Result<IndexSet<String>, anyhow::Error> {
         let mut granted_roles = IndexSet::new();
-        let grants_res = api.exec(&format!("SHOW GRANTS TO USER \"{}\";", user_name)).await;
+
+        // Query the system catalog for role grants to this user
+        let query = format!(
+            "SELECT ROLE FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS \
+             WHERE GRANTEE_NAME = '{}' AND DELETED_ON IS NULL;",
+            user_name
+        );
+
+        let grants_res = api.exec(&query).await;
 
         match grants_res {
             Ok(QueryResult::Json(json_result)) => {
-                for row in json_result.value.as_array().unwrap_or(&vec![]) {
-                    if let Some(row_arr) = row.as_array() {
-                        // SHOW GRANTS TO USER returns: created_on, role, granted_to, grantee_name, granted_by
-                        // The role name is in position 1
-                        if let Some(role_name) = row_arr.get(1).and_then(|v| v.as_str()) {
-                            if !role_name.is_empty() {
-                                granted_roles.insert(role_name.to_string());
-                            }
-                        }
+                for row in json_result.iter_records()? {
+                    let row = row?;
+                    let role_name: String = row.require_as("ROLE")?;
+                    if !role_name.is_empty() {
+                        granted_roles.insert(role_name);
                     }
                 }
             }
             Ok(QueryResult::Arrow(arrow)) => {
                 for batch in &arrow {
-                    if batch.num_columns() >= 2 {
-                        let role_col: StringArray = batch.column(1).to_data().into();
+                    if batch.num_columns() >= 1 {
+                        let role_col: StringArray = batch.column(0).to_data().into();
                         for i in 0..batch.num_rows() {
                             let role_name = role_col.value(i);
                             if !role_name.is_empty() {
@@ -422,6 +383,57 @@ impl SnowflakeConnector {
             }
             Ok(QueryResult::Empty) => {}
             Err(_) => {} // Ignore errors fetching grants, user still exists
+        }
+
+        Ok(granted_roles)
+    }
+
+    /// Get roles granted to a role using the ACCOUNT_USAGE catalog view.
+    async fn get_role_granted_roles(api: &SnowflakeApi, role_name: &str) -> Result<IndexSet<String>, anyhow::Error> {
+        let mut granted_roles = IndexSet::new();
+
+        // Query the system catalog for role grants to this role
+        // GRANTS_TO_ROLES contains all grants, so we filter for:
+        // - PRIVILEGE = 'USAGE' (role membership grants)
+        // - GRANTED_ON = 'ROLE' (the granted object is a role)
+        // - GRANTEE_NAME = role_name (this role is the recipient)
+        // - DELETED_ON IS NULL (grant is still active)
+        let query = format!(
+            "SELECT NAME FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES \
+             WHERE GRANTEE_NAME = '{}' \
+             AND PRIVILEGE = 'USAGE' \
+             AND GRANTED_ON = 'ROLE' \
+             AND DELETED_ON IS NULL;",
+            role_name
+        );
+
+        let grants_res = api.exec(&query).await;
+
+        match grants_res {
+            Ok(QueryResult::Json(json_result)) => {
+                for row in json_result.iter_records()? {
+                    let row = row?;
+                    let name: String = row.require_as("NAME")?;
+                    if !name.is_empty() {
+                        granted_roles.insert(name);
+                    }
+                }
+            }
+            Ok(QueryResult::Arrow(arrow)) => {
+                for batch in &arrow {
+                    if batch.num_columns() >= 1 {
+                        let name_col: StringArray = batch.column(0).to_data().into();
+                        for i in 0..batch.num_rows() {
+                            let name = name_col.value(i);
+                            if !name.is_empty() {
+                                granted_roles.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(QueryResult::Empty) => {}
+            Err(_) => {} // Ignore errors fetching grants, role still exists
         }
 
         Ok(granted_roles)
