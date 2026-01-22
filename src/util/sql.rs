@@ -114,7 +114,9 @@ pub fn build_alter_user_sql(name: &str, user: &SnowflakeUser) -> String {
             props.push(format!("DEFAULT_SECONDARY_ROLES = ({})", default_secondary_roles));
         }
     }
+
     props.push(format!("DISABLED = {}", if user.disabled { "TRUE" } else { "FALSE" }));
+
     if let Some(ref rsa_public_key) = user.rsa_public_key {
         props.push(format!("RSA_PUBLIC_KEY = '{}'", rsa_public_key));
     }

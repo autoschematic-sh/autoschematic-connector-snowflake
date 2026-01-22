@@ -6,17 +6,12 @@ use std::{
 };
 
 use anyhow::{Context, Error, bail};
-use arrow::array::StringArray;
 use async_trait::async_trait;
 use autoschematic_core::{
     connector::{
-        Connector, ConnectorOp, ConnectorOutbox, FilterResponse, GetResourceResponse, OpExecResponse, PlanResponseElement,
-        Resource, ResourceAddress,
-    },
-    connector_op,
-    diag::{Diagnostic, DiagnosticPosition, DiagnosticResponse, DiagnosticSeverity, DiagnosticSpan},
-    get_resource_response,
-    util::{ron_check_eq, ron_check_syntax},
+        Connector, ConnectorOp, ConnectorOutbox, DocIdent, FilterResponse, GetDocResponse, GetResourceResponse, OpExecResponse,
+        PlanResponseElement, Resource, ResourceAddress,
+    }, connector_op, diag::{Diagnostic, DiagnosticPosition, DiagnosticResponse, DiagnosticSeverity, DiagnosticSpan}, doc_dispatch, get_resource_response, util::{ron_check_eq, ron_check_syntax}
 };
 use base64::prelude::*;
 use indexmap::IndexSet;
@@ -435,7 +430,7 @@ impl Connector for SnowflakeConnector {
                         })
                     }
                     SnowflakeConnectorOp::DropUser => {
-                        let statement = format!("DROP USER {};", name);
+                        let statement = format!("DROP USER \"{}\";", name);
                         api.exec(&statement).await?;
                         Ok(OpExecResponse {
                             outputs: Some(HashMap::new()),
@@ -443,7 +438,7 @@ impl Connector for SnowflakeConnector {
                         })
                     }
                     SnowflakeConnectorOp::GrantRoleToUser(role_name) => {
-                        let statement = format!("GRANT ROLE {} TO USER {};", role_name, name);
+                        let statement = format!("GRANT ROLE \"{}\" TO USER \"{}\";", role_name, name);
                         api.exec(&statement).await?;
                         Ok(OpExecResponse {
                             outputs: Some(HashMap::new()),
@@ -451,7 +446,7 @@ impl Connector for SnowflakeConnector {
                         })
                     }
                     SnowflakeConnectorOp::RevokeRoleFromUser(role_name) => {
-                        let statement = format!("REVOKE ROLE {} FROM USER {};", role_name, name);
+                        let statement = format!("REVOKE ROLE \"{}\" FROM USER \"{}\";", role_name, name);
                         api.exec(&statement).await?;
                         Ok(OpExecResponse {
                             outputs: Some(HashMap::new()),
@@ -484,7 +479,7 @@ impl Connector for SnowflakeConnector {
                         })
                     }
                     SnowflakeConnectorOp::DropRole => {
-                        let statement = format!("DROP ROLE {};", name);
+                        let statement = format!("DROP ROLE \"{}\";", name);
                         api.exec(&statement).await?;
                         Ok(OpExecResponse {
                             outputs: Some(HashMap::new()),
@@ -492,7 +487,7 @@ impl Connector for SnowflakeConnector {
                         })
                     }
                     SnowflakeConnectorOp::GrantRoleToRole(role_name) => {
-                        let statement = format!("GRANT ROLE {} TO ROLE {};", role_name, name);
+                        let statement = format!("GRANT ROLE \"{}\" TO ROLE \"{}\";", role_name, name);
                         api.exec(&statement).await?;
                         Ok(OpExecResponse {
                             outputs: Some(HashMap::new()),
@@ -500,7 +495,7 @@ impl Connector for SnowflakeConnector {
                         })
                     }
                     SnowflakeConnectorOp::RevokeRoleFromRole(role_name) => {
-                        let statement = format!("REVOKE ROLE {} FROM ROLE {};", role_name, name);
+                        let statement = format!("REVOKE ROLE \"{}\" FROM ROLE \"{}\";", role_name, name);
                         api.exec(&statement).await?;
                         Ok(OpExecResponse {
                             outputs: Some(HashMap::new()),
@@ -511,6 +506,10 @@ impl Connector for SnowflakeConnector {
                 }
             }
         }
+    }
+
+    async fn get_docstring(&self, _addr: &Path, ident: DocIdent) -> anyhow::Result<Option<GetDocResponse>> {
+        doc_dispatch!(ident, [SnowflakeUser, SnowflakeRole])
     }
 
     async fn eq(&self, addr: &Path, a: &[u8], b: &[u8]) -> anyhow::Result<bool> {

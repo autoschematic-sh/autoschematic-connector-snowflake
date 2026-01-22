@@ -2,6 +2,9 @@ use autoschematic_core::{
     connector::{Resource, ResourceAddress},
     util::RON,
 };
+use autoschematic_macros::FieldTypes;
+use autoschematic_core::macros::FieldTypes;
+use documented::{Documented, DocumentedFields};
 use indexmap::IndexSet;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
@@ -28,9 +31,9 @@ impl Resource for SQLDefinition {
     }
 }
 
-/// Snowflake User resource - represents a user in Snowflake's RBAC system.
+/// Represents a Snowflake user.
 /// Properties map to Snowflake's ALTER USER / CREATE USER parameters.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
 #[serde(deny_unknown_fields)]
 pub struct SnowflakeUser {
     /// The login name for the user (can differ from the user name).
@@ -95,13 +98,18 @@ impl Resource for SnowflakeUser {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
 #[serde(deny_unknown_fields)]
+/// Represents a Snowflake role.
+/// Properties map to Snowflake's ALTER ROLE / CREATE ROLE parameters.
 pub struct SnowflakeRole {
+    /// Owner of the role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// Comment/description for the role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    /// Roles granted to this role (i.e., roles this role inherits privileges from).
+    /// Roles granted to this role (i.e., roles this role can assume).
     #[serde(default, skip_serializing_if = "IndexSet::is_empty")]
     pub granted_roles: IndexSet<String>,
 }

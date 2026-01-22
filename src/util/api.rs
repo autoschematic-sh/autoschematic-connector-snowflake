@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use arrow::array::StringArray;
-use autoschematic_core::{connector::GetResourceResponse, get_resource_response};
+use autoschematic_core::connector::GetResourceResponse;
 use indexmap::IndexSet;
-use snowflake_api::{QueryResult, SnowflakeApi};
+use snowflake_api::{JsonResult, QueryResult, SnowflakeApi};
 use sqlparser::ast::{DescribeAlias, Statement};
 
 use crate::{
     connector::SnowflakeConnector,
     error::SnowflakeConnectorError,
-    resource::{SQLDefinition, SnowflakeRole, SnowflakeUser},
+    resource::{SnowflakeRole, SnowflakeUser},
     util::record::JsonResultExt,
 };
 
@@ -119,6 +119,26 @@ impl SnowflakeConnector {
         }
     }
 
+    pub async fn describe_if_exists(api: &SnowflakeApi, query: &str) -> Result<Option<JsonResult>, anyhow::Error> {
+        match api.exec(query).await {
+            Ok(QueryResult::Json(json_result)) => Ok(Some(json_result)),
+            Ok(snowflake_api::QueryResult::Arrow(_)) => {
+                bail!(SnowflakeConnectorError::UnexpectedArrowResult)
+            }
+            Ok(snowflake_api::QueryResult::Empty) => {
+                return Ok(None);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                tracing::debug!("describe_if_exists: e: {err_str}");
+                if err_str.contains("does not exist") {
+                    return Ok(None);
+                }
+                return Err(e.into());
+            }
+        }
+    }
+
     pub async fn list_warehouses(api: &SnowflakeApi) -> Result<Vec<String>, anyhow::Error> {
         let res = api.exec("SHOW WAREHOUSES;").await?;
         let mut warehouses = Vec::new();
@@ -199,7 +219,9 @@ impl SnowflakeConnector {
     }
 
     pub async fn get_user(api: &SnowflakeApi, name: &str) -> Result<Option<SnowflakeUser>, anyhow::Error> {
-        let QueryResult::Json(json_result) = api.exec(&format!("DESCRIBE USER \"{}\";", name)).await? else {
+        // TODO We need to match e (error) as like, "%does not exist%"...
+        let Some(json_result) = SnowflakeConnector::describe_if_exists(api, &format!("DESCRIBE USER \"{}\";", name)).await?
+        else {
             return Ok(None);
         };
         // tracing::debug!("DESCRIBE USER {}: \"{}\"", name, json_result.value);
@@ -287,155 +309,85 @@ impl SnowflakeConnector {
     /// Returns None if role doesn't exist.
     pub async fn get_role(api: &SnowflakeApi, name: &str) -> Result<Option<SnowflakeRole>, anyhow::Error> {
         // First check if role exists using SHOW ROLES LIKE
-        let res = api.exec(&format!("SHOW ROLES LIKE '{}';", name)).await;
-
-        let (comment, role_exists) = match res {
-            Ok(QueryResult::Json(json_result)) => {
-                if let Some(rows) = json_result.value.as_array() {
-                    if rows.is_empty() {
-                        return Ok(None);
-                    }
-                    // SHOW ROLES returns: created_on, name, is_default, is_current, is_inherited, assigned_to_users, granted_to_roles, granted_roles, owner, comment
-                    let comment = rows
-                        .first()
-                        .and_then(|r| r.as_array())
-                        .and_then(|r| r.get(9))
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string());
-                    (comment, true)
-                } else {
-                    return Ok(None);
-                }
-            }
-            Ok(QueryResult::Arrow(arrow)) => {
-                if arrow.is_empty() || arrow.first().map(|b| b.num_rows()).unwrap_or(0) == 0 {
-                    return Ok(None);
-                }
-                let comment = if let Some(batch) = arrow.first() {
-                    if batch.num_columns() > 9 {
-                        let comment_col: StringArray = batch.column(9).to_data().into();
-                        let val = comment_col.value(0);
-                        if val.is_empty() { None } else { Some(val.to_string()) }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                (comment, true)
-            }
-            Ok(QueryResult::Empty) => return Ok(None),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("does not exist") {
-                    return Ok(None);
-                }
-                return Err(e.into());
-            }
+        let Some(json_result) = Self::describe_if_exists(api, &format!("SHOW ROLES LIKE '{}';", name)).await? else {
+            return Ok(None);
         };
 
-        if !role_exists {
-            return Ok(None);
+        let mut comment = None;
+        let mut owner = None;
+
+        for row in json_result.iter_records()? {
+            let row = row?;
+
+            comment = row.get_as("comment")?;
+            owner = row.get_as("owner")?.filter(|s: &String| !s.is_empty());
         }
 
-        // Get roles granted to this role using the ACCOUNT_USAGE catalog view
+        // Get roles granted to this role via SHOW GRANTS
         let granted_roles = Self::get_role_granted_roles(api, name).await?;
 
-        Ok(Some(SnowflakeRole { comment, granted_roles }))
+        Ok(Some(SnowflakeRole {
+            owner,
+            comment,
+            granted_roles,
+        }))
     }
 
-    /// Get roles granted to a user using the ACCOUNT_USAGE catalog view.
+    /// Get roles granted to a user via SHOW GRANTS TO USER.
     async fn get_user_granted_roles(api: &SnowflakeApi, user_name: &str) -> Result<IndexSet<String>, anyhow::Error> {
-        let mut granted_roles = IndexSet::new();
+        let mut granted_roles = Vec::new();
 
-        // Query the system catalog for role grants to this user
-        let query = format!(
-            "SELECT ROLE FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS \
-             WHERE GRANTEE_NAME = '{}' AND DELETED_ON IS NULL;",
-            user_name
-        );
+        // SHOW GRANTS TO USER returns: created_on, role, granted_to, grantee_name, granted_by
+        let query = format!("SHOW GRANTS TO USER \"{}\";", user_name);
 
-        let grants_res = api.exec(&query).await;
-
-        match grants_res {
-            Ok(QueryResult::Json(json_result)) => {
-                for row in json_result.iter_records()? {
-                    let row = row?;
-                    let role_name: String = row.require_as("ROLE")?;
-                    if !role_name.is_empty() {
-                        granted_roles.insert(role_name);
-                    }
+        if let Ok(QueryResult::Json(json_result)) = api.exec(&query).await {
+            for row in json_result.iter_records()? {
+                let row = row?;
+                let Ok(Some(role_name)): Result<Option<String>, _> = row.get_as("role") else {
+                    continue;
+                };
+                let role_name = role_name.strip_prefix("\"").unwrap_or(&role_name);
+                let role_name = role_name.strip_suffix("\"").unwrap_or(&role_name);
+                if !role_name.is_empty() {
+                    granted_roles.push(role_name.to_string());
                 }
             }
-            Ok(QueryResult::Arrow(arrow)) => {
-                for batch in &arrow {
-                    if batch.num_columns() >= 1 {
-                        let role_col: StringArray = batch.column(0).to_data().into();
-                        for i in 0..batch.num_rows() {
-                            let role_name = role_col.value(i);
-                            if !role_name.is_empty() {
-                                granted_roles.insert(role_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(QueryResult::Empty) => {}
-            Err(_) => {} // Ignore errors fetching grants, user still exists
         }
 
-        Ok(granted_roles)
+        granted_roles.sort();
+
+        Ok(IndexSet::from_iter(granted_roles.into_iter()))
     }
 
-    /// Get roles granted to a role using the ACCOUNT_USAGE catalog view.
+    /// Get roles granted to a role via SHOW GRANTS TO ROLE.
     async fn get_role_granted_roles(api: &SnowflakeApi, role_name: &str) -> Result<IndexSet<String>, anyhow::Error> {
-        let mut granted_roles = IndexSet::new();
+        let mut granted_roles = Vec::new();
 
-        // Query the system catalog for role grants to this role
-        // GRANTS_TO_ROLES contains all grants, so we filter for:
-        // - PRIVILEGE = 'USAGE' (role membership grants)
-        // - GRANTED_ON = 'ROLE' (the granted object is a role)
-        // - GRANTEE_NAME = role_name (this role is the recipient)
-        // - DELETED_ON IS NULL (grant is still active)
-        let query = format!(
-            "SELECT NAME FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES \
-             WHERE GRANTEE_NAME = '{}' \
-             AND PRIVILEGE = 'USAGE' \
-             AND GRANTED_ON = 'ROLE' \
-             AND DELETED_ON IS NULL;",
-            role_name
-        );
+        // SHOW GRANTS TO ROLE returns: created_on, privilege, granted_on, name, granted_to, grantee_name, grant_option, granted_by
+        // We filter for privilege="USAGE" and granted_on="ROLE" to get role membership grants
+        let query = format!("SHOW GRANTS TO ROLE \"{}\";", role_name);
 
-        let grants_res = api.exec(&query).await;
+        if let Ok(QueryResult::Json(json_result)) = api.exec(&query).await {
+            for row in json_result.iter_records()? {
+                let row = row?;
+                let privilege: String = row.require_as("privilege")?;
+                let granted_on: String = row.require_as("granted_on")?;
 
-        match grants_res {
-            Ok(QueryResult::Json(json_result)) => {
-                for row in json_result.iter_records()? {
-                    let row = row?;
-                    let name: String = row.require_as("NAME")?;
-                    if !name.is_empty() {
-                        granted_roles.insert(name);
+                if privilege == "USAGE" && granted_on == "ROLE" {
+                    let Some(role_name): Option<String> = row.get_as("name")? else {
+                        continue;
+                    };
+                    let role_name = role_name.strip_prefix("\"").unwrap_or(&role_name);
+                    let role_name = role_name.strip_suffix("\"").unwrap_or(&role_name);
+                    if !role_name.is_empty() {
+                        granted_roles.push(role_name.to_string());
                     }
                 }
             }
-            Ok(QueryResult::Arrow(arrow)) => {
-                for batch in &arrow {
-                    if batch.num_columns() >= 1 {
-                        let name_col: StringArray = batch.column(0).to_data().into();
-                        for i in 0..batch.num_rows() {
-                            let name = name_col.value(i);
-                            if !name.is_empty() {
-                                granted_roles.insert(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(QueryResult::Empty) => {}
-            Err(_) => {} // Ignore errors fetching grants, role still exists
         }
 
-        Ok(granted_roles)
+        granted_roles.sort();
+
+        Ok(IndexSet::from_iter(granted_roles.into_iter()))
     }
 }
