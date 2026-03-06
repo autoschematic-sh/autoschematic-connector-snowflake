@@ -10,8 +10,12 @@ use async_trait::async_trait;
 use autoschematic_core::{
     connector::{
         Connector, ConnectorOp, ConnectorOutbox, DocIdent, FilterResponse, GetDocResponse, GetResourceResponse, OpExecResponse,
-        PlanResponseElement, Resource, ResourceAddress,
-    }, connector_op, diag::{Diagnostic, DiagnosticPosition, DiagnosticResponse, DiagnosticSeverity, DiagnosticSpan}, doc_dispatch, get_resource_response, util::{ron_check_eq, ron_check_syntax}
+        PlanResponseElement, Resource, ResourceAddress, SkeletonResponse,
+    },
+    connector_op,
+    diag::{Diagnostic, DiagnosticPosition, DiagnosticResponse, DiagnosticSeverity, DiagnosticSpan},
+    doc_dispatch, get_resource_response, skeleton,
+    util::{ron_check_eq, ron_check_syntax},
 };
 use base64::prelude::*;
 use indexmap::IndexSet;
@@ -187,14 +191,30 @@ impl Connector for SnowflakeConnector {
         let mut res = Vec::new();
 
         match &addr {
-            SnowflakeResourceAddress::Database { .. } => match (current, desired) {
+            SnowflakeResourceAddress::Database { name } => match (current, desired) {
                 (None, None) => Ok(Vec::new()),
-                (Some(_), None) => Ok(Vec::new()),
-                (Some(_), Some(_)) => Ok(Vec::new()),
+                (Some(_), None) => {
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Delete,
+                        format!("DROP DATABASE `{}`", name)
+                    ));
+                    Ok(res)
+                }
+                (Some(_), Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE DATABASE `{}`", name)
+                    ));
+                    Ok(res)
+                }
                 (None, Some(definition)) => {
-                    let _definition = SQLDefinition::from_bytes(&addr, &definition);
-                    let _api = self.get_api(None, None).await?;
-                    Ok(vec![])
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE DATABASE `{}`", name)
+                    ));
+                    Ok(res)
                 }
             },
             SnowflakeResourceAddress::User { name } => {
@@ -522,6 +542,31 @@ impl Connector for SnowflakeConnector {
             // SQL-based resources (warehouses, databases, schemas, tables)
             _ => Ok(a == b),
         }
+    }
+
+    async fn get_skeletons(&self) -> Result<Vec<SkeletonResponse>, anyhow::Error> {
+        let mut res = Vec::new();
+
+        res.push(skeleton!(
+            SnowflakeResourceAddress::User { name: "[name]".into() },
+            SnowflakeUser {
+                first_name: Some("first_name".into()),
+                last_name: Some("last_name".into()),
+                email: Some("email".into()),
+                comment: Some("comment".into()),
+                ..Default::default()
+            }
+        ));
+
+        res.push(skeleton!(
+            SnowflakeResourceAddress::Role { name: "[name]".into() },
+            SnowflakeRole {
+                owner: Some("ACCOUNTADMIN".into()),
+                comment: Some("comment".into()),
+                ..Default::default()
+            }
+        ));
+        Ok(res)
     }
 
     async fn diag(&self, addr: &Path, a: &[u8]) -> Result<Option<DiagnosticResponse>, anyhow::Error> {

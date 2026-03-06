@@ -153,7 +153,7 @@ impl ObjectType {
 
 /// Represents a Snowflake user.
 /// Properties map to Snowflake's ALTER USER / CREATE USER parameters.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
 #[serde(deny_unknown_fields)]
 pub struct SnowflakeUser {
     /// The login name for the user (can differ from the user name).
@@ -225,7 +225,7 @@ impl Resource for SnowflakeUser {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
 #[serde(deny_unknown_fields)]
 /// Represents a Snowflake role.
 /// Properties map to Snowflake's ALTER ROLE / CREATE ROLE parameters.

@@ -41,10 +41,10 @@ impl SnowflakeConnector {
 
     pub async fn get_ddl(&self, object_type: &str, name: &str) -> Result<Option<GetResourceResponse>, anyhow::Error> {
         let api = self.get_api(None, None).await?;
-        let res = api.exec(&format!("SELECT GET_DDL('{}', '{}');", object_type, name)).await?;
+        let res = api.exec(&format!("SELECT GET_DDL('{}', '{}');", object_type, name)).await;
 
         match res {
-            snowflake_api::QueryResult::Arrow(arrow) => {
+            Ok(snowflake_api::QueryResult::Arrow(arrow)) => {
                 tracing::warn!("SELECT GET DDL: arrow {:?}", arrow);
                 let ddl = arrow.first().unwrap().column(0);
                 let ddl: StringArray = ddl.to_data().into();
@@ -62,11 +62,19 @@ impl SnowflakeConnector {
                     outputs: None,
                 }));
             }
-            snowflake_api::QueryResult::Empty => {
+            Ok(snowflake_api::QueryResult::Empty) => {
                 tracing::warn!("SELECT GET DDL: EMPTY????");
             }
-            snowflake_api::QueryResult::Json(json) => {
+            Ok(snowflake_api::QueryResult::Json(json)) => {
                 tracing::warn!("SELECT GET DDL: json {}", json.value);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                tracing::debug!("describe_if_exists: e: {err_str}");
+                if err_str.contains("does not exist") {
+                    return Ok(None);
+                }
+                return Err(e.into());
             }
         }
 
