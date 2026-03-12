@@ -59,6 +59,7 @@ impl SnowflakeConnector {
 
                 return Ok(Some(GetResourceResponse {
                     resource_definition: first_statement.into_bytes(),
+                    virt_addr: None,
                     outputs: None,
                 }));
             }
@@ -286,7 +287,6 @@ impl SnowflakeConnector {
         user.granted_roles = Self::get_user_granted_roles(&api, name).await?;
 
         user.grants = Self::get_grants(&api, "USER", name, false).await?;
-        user.future_grants = Self::get_grants(&api, "USER", name, true).await?;
         Ok(Some(user))
     }
 

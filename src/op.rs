@@ -20,6 +20,18 @@ pub enum SnowflakeConnectorOp {
     RevokeRoleFromUser(String), // role_name to revoke from user at addr
     GrantRoleToRole(String),    // role_name to grant to role at addr
     RevokeRoleFromRole(String), // role_name to revoke from role at addr
+    // Object privilege operations
+    GrantPrivilege {
+        privilege: String,
+        object_type: ObjectType,
+        future: bool,
+    },
+    RevokePrivilege {
+        privilege: String,
+        object_type: ObjectType,
+        future: bool,
+    },
+    TransferRoleOwnership(String), // owner role name
 }
 
 impl ConnectorOp for SnowflakeConnectorOp {
