@@ -60,12 +60,12 @@ impl ResourceAddress for SnowflakeResourceAddress {
                 schema: schema.to_string(),
                 name: name.to_string(),
             }),
-            ["snowflake", "users", name] if name.ends_with(".ron") => {
-                Ok(SnowflakeResourceAddress::User{name: strip_ron_suffix(name)})
-            }
-            ["snowflake", "roles", name] if name.ends_with(".ron") => {
-                Ok(SnowflakeResourceAddress::Role{name: strip_ron_suffix(name)})
-            }
+            ["snowflake", "users", name] if name.ends_with(".ron") => Ok(SnowflakeResourceAddress::User {
+                name: strip_ron_suffix(name),
+            }),
+            ["snowflake", "roles", name] if name.ends_with(".ron") => Ok(SnowflakeResourceAddress::Role {
+                name: strip_ron_suffix(name),
+            }),
             _ => Err(invalid_addr_path(path)),
         }
     }
