@@ -181,7 +181,7 @@ pub struct SnowflakeUser {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_role: Option<String>,
     /// Default secondary roles (ALL or NONE).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub default_secondary_roles: Option<String>,
     /// Whether the user is disabled.
     #[serde(default)]
