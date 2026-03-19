@@ -27,9 +27,6 @@ jobs:
         id: get_version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Install TOML CLI
-        id: install_toml
-        run: pip install toml-cli
 
       - name: Generate changelog
         id: changelog
@@ -139,7 +136,7 @@ jobs:
 
       - name: Build & upload Python binary wheels
         run: |
-          pip install twine
+          pip install twine toml-cli
           bash scripts/build_pip_wheels.sh ${{ matrix.target }} target/${{ matrix.target }}/release/autoschematic-connector-snowflake
           bash scripts/publish_pip.sh
 
