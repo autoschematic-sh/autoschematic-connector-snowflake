@@ -272,7 +272,7 @@ impl SnowflakeConnector {
                 "DEFAULT_WAREHOUSE" => user.default_warehouse = value_opt,
                 "DEFAULT_NAMESPACE" => user.default_namespace = value_opt,
                 "DEFAULT_ROLE" => user.default_role = value_opt,
-                "DEFAULT_SECONDARY_ROLES" => user.default_secondary_roles = value_opt,
+                // "DEFAULT_SECONDARY_ROLES" => user.default_secondary_roles = value_opt,
                 "DISABLED" => user.disabled = value == "true",
                 "RSA_PUBLIC_KEY" => user.rsa_public_key = value_opt,
                 "RSA_PUBLIC_KEY_2" => user.rsa_public_key_2 = value_opt,

@@ -8,11 +8,11 @@ pub enum SnowflakeConnectorOp {
     Execute(SQLDefinition),
     Delete,
     // User operations
-    CreateUser(SnowflakeUser),
+    CreateUser(Box<SnowflakeUser>),
     AlterUser(Box<SnowflakeUser>, Box<SnowflakeUser>), // (old, new)
     DropUser,
     // Role operations
-    CreateRole(SnowflakeRole),
+    CreateRole(Box<SnowflakeRole>),
     AlterRole(Box<SnowflakeRole>, Box<SnowflakeRole>), // (old, new)
     DropRole,
     // Role grant operations - explicit ops for granting/revoking roles

@@ -296,32 +296,30 @@ impl Connector for SnowflakeConnector {
     async fn get(&self, addr: &Path) -> Result<Option<GetResourceResponse>, anyhow::Error> {
         let addr = SnowflakeResourceAddress::from_path(addr)?;
         match &addr {
-            addr => match &addr {
-                SnowflakeResourceAddress::Warehouse { name } => self.get_ddl("WAREHOUSE", name).await,
-                SnowflakeResourceAddress::Database { name } => self.get_ddl("DATABASE", name).await,
-                SnowflakeResourceAddress::Schema { database, name } => {
-                    self.get_ddl("SCHEMA", &format!("{}.{}", database, name)).await
+            SnowflakeResourceAddress::Warehouse { name } => self.get_ddl("WAREHOUSE", name).await,
+            SnowflakeResourceAddress::Database { name } => self.get_ddl("DATABASE", name).await,
+            SnowflakeResourceAddress::Schema { database, name } => {
+                self.get_ddl("SCHEMA", &format!("{}.{}", database, name)).await
+            }
+            SnowflakeResourceAddress::Table { database, schema, name } => {
+                self.get_ddl("TABLE", &format!("{}.{}.{}", database, schema, name)).await
+            }
+            SnowflakeResourceAddress::User { name } => {
+                let api = self.get_api(None, None).await?;
+                if let Some(user) = SnowflakeConnector::get_user(&api, name).await? {
+                    get_resource_response!(user)
+                } else {
+                    Ok(None)
                 }
-                SnowflakeResourceAddress::Table { database, schema, name } => {
-                    self.get_ddl("TABLE", &format!("{}.{}.{}", database, schema, name)).await
+            }
+            SnowflakeResourceAddress::Role { name } => {
+                let api = self.get_api(None, None).await?;
+                if let Some(role) = SnowflakeConnector::get_role(&api, name).await? {
+                    get_resource_response!(role)
+                } else {
+                    Ok(None)
                 }
-                SnowflakeResourceAddress::User { name } => {
-                    let api = self.get_api(None, None).await?;
-                    if let Some(user) = SnowflakeConnector::get_user(&api, name).await? {
-                        get_resource_response!(user)
-                    } else {
-                        Ok(None)
-                    }
-                }
-                SnowflakeResourceAddress::Role { name } => {
-                    let api = self.get_api(None, None).await?;
-                    if let Some(role) = SnowflakeConnector::get_role(&api, name).await? {
-                        get_resource_response!(role)
-                    } else {
-                        Ok(None)
-                    }
-                }
-            },
+            }
         }
     }
 
@@ -372,7 +370,7 @@ impl Connector for SnowflakeConnector {
                         let roles_to_grant = new_user.granted_roles.clone();
                         let grants_to_apply = new_user.grants.clone();
                         res.push(connector_op!(
-                            SnowflakeConnectorOp::CreateUser(new_user.clone()),
+                            SnowflakeConnectorOp::CreateUser(Box::new(new_user.clone())),
                             format!("Create Snowflake user `{}`", name)
                         ));
                         for role in roles_to_grant {
@@ -446,7 +444,7 @@ impl Connector for SnowflakeConnector {
                         let desired_owner = new_role.owner.clone();
                         let session_role = self.current_session_role().await;
                         res.push(connector_op!(
-                            SnowflakeConnectorOp::CreateRole(new_role.clone()),
+                            SnowflakeConnectorOp::CreateRole(Box::new(new_role.clone())),
                             format!("Create Snowflake role `{}`", name)
                         ));
                         for role in roles_to_grant {
