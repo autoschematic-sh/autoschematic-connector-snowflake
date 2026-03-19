@@ -60,5 +60,5 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      - name: Run doc tests
-        run: cargo test --workspace --doc
+      # - name: Run doc tests
+      #   run: cargo test --workspace --doc
