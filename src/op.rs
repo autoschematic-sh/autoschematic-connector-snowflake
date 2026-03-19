@@ -9,11 +9,11 @@ pub enum SnowflakeConnectorOp {
     Delete,
     // User operations
     CreateUser(SnowflakeUser),
-    AlterUser(SnowflakeUser, SnowflakeUser), // (old, new)
+    AlterUser(Box<SnowflakeUser>, Box<SnowflakeUser>), // (old, new)
     DropUser,
     // Role operations
     CreateRole(SnowflakeRole),
-    AlterRole(SnowflakeRole, SnowflakeRole), // (old, new)
+    AlterRole(Box<SnowflakeRole>, Box<SnowflakeRole>), // (old, new)
     DropRole,
     // Role grant operations - explicit ops for granting/revoking roles
     GrantRoleToUser(String),    // role_name to grant to user at addr

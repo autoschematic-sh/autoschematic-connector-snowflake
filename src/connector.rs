@@ -58,45 +58,6 @@ impl PrivilegeTargetKind {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn flatten_grants_is_order_independent() {
-        let mut grants = IndexMap::new();
-        grants.insert(
-            "USAGE".into(),
-            vec![
-                ObjectType::SCHEMA("RAW.PUBLIC".into()),
-                ObjectType::DATABASE("RAW".into()),
-                ObjectType::SCHEMA("RAW.PUBLIC".into()),
-            ],
-        );
-        grants.insert("SELECT".into(), vec![ObjectType::TABLE("RAW.PUBLIC.EVENTS".into())]);
-
-        let flattened = SnowflakeConnector::flatten_grants(&grants);
-
-        assert_eq!(flattened.len(), 3);
-        assert!(flattened.contains(&("USAGE".into(), ObjectType::DATABASE("RAW".into()))));
-        assert!(flattened.contains(&("USAGE".into(), ObjectType::SCHEMA("RAW.PUBLIC".into()))));
-        assert!(flattened.contains(&("SELECT".into(), ObjectType::TABLE("RAW.PUBLIC.EVENTS".into()))));
-    }
-
-    #[test]
-    fn users_reject_future_grants() {
-        let mut user = SnowflakeUser::default();
-        user.future_grants
-            .insert("SELECT".into(), vec![ObjectType::TABLE("RAW.PUBLIC".into())]);
-
-        let err = SnowflakeConnector::validate_user(&user).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Snowflake does not support FUTURE grants directly to users")
-        );
-    }
-}
-
 impl SnowflakeConnector {
     async fn current_session_role(&self) -> Option<String> {
         self.config.lock().await.as_ref().map(|config| config.role.clone())
@@ -444,7 +405,7 @@ impl Connector for SnowflakeConnector {
                         let new_props = Self::user_properties_only(&new_user);
                         if old_props != new_props {
                             res.push(connector_op!(
-                                SnowflakeConnectorOp::AlterUser(old_user.clone(), new_user.clone()),
+                                SnowflakeConnectorOp::AlterUser(Box::new(old_user.clone()), Box::new(new_user.clone())),
                                 format!("Alter Snowflake user `{}`", name)
                             ));
                         }
@@ -532,7 +493,7 @@ impl Connector for SnowflakeConnector {
 
                         if Self::role_properties_only(&old_role) != Self::role_properties_only(&new_role) {
                             res.push(connector_op!(
-                                SnowflakeConnectorOp::AlterRole(old_role.clone(), new_role.clone()),
+                                SnowflakeConnectorOp::AlterRole(Box::new(old_role.clone()), Box::new(new_role.clone())),
                                 format!("Alter Snowflake role `{}`", name)
                             ));
                         }
@@ -955,5 +916,44 @@ impl Connector for SnowflakeConnector {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flatten_grants_is_order_independent() {
+        let mut grants = IndexMap::new();
+        grants.insert(
+            "USAGE".into(),
+            vec![
+                ObjectType::SCHEMA("RAW.PUBLIC".into()),
+                ObjectType::DATABASE("RAW".into()),
+                ObjectType::SCHEMA("RAW.PUBLIC".into()),
+            ],
+        );
+        grants.insert("SELECT".into(), vec![ObjectType::TABLE("RAW.PUBLIC.EVENTS".into())]);
+
+        let flattened = SnowflakeConnector::flatten_grants(&grants);
+
+        assert_eq!(flattened.len(), 3);
+        assert!(flattened.contains(&("USAGE".into(), ObjectType::DATABASE("RAW".into()))));
+        assert!(flattened.contains(&("USAGE".into(), ObjectType::SCHEMA("RAW.PUBLIC".into()))));
+        assert!(flattened.contains(&("SELECT".into(), ObjectType::TABLE("RAW.PUBLIC.EVENTS".into()))));
+    }
+
+    #[test]
+    fn users_reject_future_grants() {
+        let mut user = SnowflakeUser::default();
+        user.future_grants
+            .insert("SELECT".into(), vec![ObjectType::TABLE("RAW.PUBLIC".into())]);
+
+        let err = SnowflakeConnector::validate_user(&user).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Snowflake does not support FUTURE grants directly to users")
+        );
     }
 }
