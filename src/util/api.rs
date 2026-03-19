@@ -134,9 +134,7 @@ impl SnowflakeConnector {
             Ok(snowflake_api::QueryResult::Arrow(_)) => {
                 bail!(SnowflakeConnectorError::UnexpectedArrowResult)
             }
-            Ok(snowflake_api::QueryResult::Empty) => {
-                Ok(None)
-            }
+            Ok(snowflake_api::QueryResult::Empty) => Ok(None),
             Err(e) => {
                 let err_str = e.to_string();
                 tracing::debug!("describe_if_exists: e: {err_str}");

@@ -512,12 +512,13 @@ impl Connector for SnowflakeConnector {
                         )?;
 
                         if let Some(owner) = desired_owner
-                            && session_role.as_deref() != Some(owner.as_str()) {
-                                res.push(connector_op!(
-                                    SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
-                                    format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
-                                ));
-                            }
+                            && session_role.as_deref() != Some(owner.as_str())
+                        {
+                            res.push(connector_op!(
+                                SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
+                                format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
+                            ));
+                        }
                     }
                     (Some(_old_role_bytes), None) => {
                         res.push(connector_op!(
@@ -567,12 +568,13 @@ impl Connector for SnowflakeConnector {
                         )?;
 
                         if old_role.owner != new_role.owner
-                            && let Some(owner) = new_role.owner.clone() {
-                                res.push(connector_op!(
-                                    SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
-                                    format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
-                                ));
-                            }
+                            && let Some(owner) = new_role.owner.clone()
+                        {
+                            res.push(connector_op!(
+                                SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
+                                format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
+                            ));
+                        }
                     }
                 }
                 Ok(res)
@@ -894,19 +896,20 @@ impl Connector for SnowflakeConnector {
                 let mut response = ron_check_syntax::<SnowflakeUser>(a)?;
 
                 if let Some(ref mut response) = response
-                    && response.diagnostics.is_empty() {
-                        let user = SnowflakeUser::from_bytes(&addr, a)?;
-                        if !user.future_grants.is_empty() {
-                            response.diagnostics.push(Diagnostic {
-                                severity: DiagnosticSeverity::ERROR as u8,
-                                span: DiagnosticSpan {
-                                    start: DiagnosticPosition { line: 1, col: 1 },
-                                    end: DiagnosticPosition { line: 1, col: 1 },
-                                },
-                                message: "Snowflake does not support FUTURE grants directly to users".into(),
-                            });
-                        }
+                    && response.diagnostics.is_empty()
+                {
+                    let user = SnowflakeUser::from_bytes(&addr, a)?;
+                    if !user.future_grants.is_empty() {
+                        response.diagnostics.push(Diagnostic {
+                            severity: DiagnosticSeverity::ERROR as u8,
+                            span: DiagnosticSpan {
+                                start: DiagnosticPosition { line: 1, col: 1 },
+                                end: DiagnosticPosition { line: 1, col: 1 },
+                            },
+                            message: "Snowflake does not support FUTURE grants directly to users".into(),
+                        });
                     }
+                }
 
                 Ok(response)
             }
