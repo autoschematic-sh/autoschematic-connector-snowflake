@@ -427,7 +427,7 @@ impl SnowflakeConnector {
 
         granted_roles.sort();
 
-        Ok(IndexSet::from_iter(granted_roles.into_iter()))
+        Ok(IndexSet::from_iter(granted_roles))
     }
 
     /// Get roles granted to a role via SHOW GRANTS TO ROLE.
@@ -459,6 +459,6 @@ impl SnowflakeConnector {
 
         granted_roles.sort();
 
-        Ok(IndexSet::from_iter(granted_roles.into_iter()))
+        Ok(IndexSet::from_iter(granted_roles))
     }
 }
