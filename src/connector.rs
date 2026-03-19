@@ -192,7 +192,7 @@ impl SnowflakeConnector {
         let old_specs = Self::flatten_grants(old_grants);
         let new_specs = Self::flatten_grants(new_grants);
 
-        for (privilege, object_type) in new_specs.difference(&old_specs).cloned() {
+        for (privilege, object_type) in new_specs.difference(&old_specs) {
             res.push(connector_op!(
                 SnowflakeConnectorOp::GrantPrivilege {
                     privilege: privilege.clone(),
@@ -202,14 +202,14 @@ impl SnowflakeConnector {
                 format!(
                     "Grant {} on {} to {} `{}`",
                     privilege,
-                    Self::describe_object_type(&object_type, future),
+                    Self::describe_object_type(object_type, future),
                     target_kind.display_name(),
                     target_name
                 )
             ));
         }
 
-        for (privilege, object_type) in old_specs.difference(&new_specs).cloned() {
+        for (privilege, object_type) in old_specs.difference(&new_specs) {
             res.push(connector_op!(
                 SnowflakeConnectorOp::RevokePrivilege {
                     privilege: privilege.clone(),
@@ -219,7 +219,7 @@ impl SnowflakeConnector {
                 format!(
                     "Revoke {} on {} from {} `{}`",
                     privilege,
-                    Self::describe_object_type(&object_type, future),
+                    Self::describe_object_type(object_type, future),
                     target_kind.display_name(),
                     target_name
                 )
@@ -336,8 +336,8 @@ impl Connector for SnowflakeConnector {
         let addr = SnowflakeResourceAddress::from_path(addr)?;
         match &addr {
             addr => match &addr {
-                SnowflakeResourceAddress::Warehouse { name } => self.get_ddl("WAREHOUSE", &name).await,
-                SnowflakeResourceAddress::Database { name } => self.get_ddl("DATABASE", &name).await,
+                SnowflakeResourceAddress::Warehouse { name } => self.get_ddl("WAREHOUSE", name).await,
+                SnowflakeResourceAddress::Database { name } => self.get_ddl("DATABASE", name).await,
                 SnowflakeResourceAddress::Schema { database, name } => {
                     self.get_ddl("SCHEMA", &format!("{}.{}", database, name)).await
                 }
@@ -511,14 +511,13 @@ impl Connector for SnowflakeConnector {
                             true,
                         )?;
 
-                        if let Some(owner) = desired_owner {
-                            if session_role.as_deref() != Some(owner.as_str()) {
+                        if let Some(owner) = desired_owner
+                            && session_role.as_deref() != Some(owner.as_str()) {
                                 res.push(connector_op!(
                                     SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
                                     format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
                                 ));
                             }
-                        }
                     }
                     (Some(_old_role_bytes), None) => {
                         res.push(connector_op!(
@@ -567,14 +566,13 @@ impl Connector for SnowflakeConnector {
                             true,
                         )?;
 
-                        if old_role.owner != new_role.owner {
-                            if let Some(owner) = new_role.owner.clone() {
+                        if old_role.owner != new_role.owner
+                            && let Some(owner) = new_role.owner.clone() {
                                 res.push(connector_op!(
                                     SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
                                     format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
                                 ));
                             }
-                        }
                     }
                 }
                 Ok(res)
@@ -895,8 +893,8 @@ impl Connector for SnowflakeConnector {
             addr @ SnowflakeResourceAddress::User { .. } => {
                 let mut response = ron_check_syntax::<SnowflakeUser>(a)?;
 
-                if let Some(ref mut response) = response {
-                    if response.diagnostics.is_empty() {
+                if let Some(ref mut response) = response
+                    && response.diagnostics.is_empty() {
                         let user = SnowflakeUser::from_bytes(&addr, a)?;
                         if !user.future_grants.is_empty() {
                             response.diagnostics.push(Diagnostic {
@@ -909,7 +907,6 @@ impl Connector for SnowflakeConnector {
                             });
                         }
                     }
-                }
 
                 Ok(response)
             }

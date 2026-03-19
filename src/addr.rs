@@ -40,7 +40,6 @@ impl ResourceAddress for SnowflakeResourceAddress {
     fn from_path(path: &Path) -> Result<Self, anyhow::Error> {
         let path_components: Vec<&str> = path
             .components()
-            .into_iter()
             .map(|s| s.as_os_str().to_str().unwrap())
             .collect();
 

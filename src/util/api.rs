@@ -135,7 +135,7 @@ impl SnowflakeConnector {
                 bail!(SnowflakeConnectorError::UnexpectedArrowResult)
             }
             Ok(snowflake_api::QueryResult::Empty) => {
-                return Ok(None);
+                Ok(None)
             }
             Err(e) => {
                 let err_str = e.to_string();
@@ -143,7 +143,7 @@ impl SnowflakeConnector {
                 if err_str.contains("does not exist") {
                     return Ok(None);
                 }
-                return Err(e.into());
+                Err(e.into())
             }
         }
     }
@@ -284,9 +284,9 @@ impl SnowflakeConnector {
         }
 
         // Fetch roles granted to this user
-        user.granted_roles = Self::get_user_granted_roles(&api, name).await?;
+        user.granted_roles = Self::get_user_granted_roles(api, name).await?;
 
-        user.grants = Self::get_grants(&api, "USER", name, false).await?;
+        user.grants = Self::get_grants(api, "USER", name, false).await?;
         Ok(Some(user))
     }
 
@@ -338,8 +338,8 @@ impl SnowflakeConnector {
 
         // Get roles granted to this role via SHOW GRANTS
         let granted_roles = Self::get_role_granted_roles(api, name).await?;
-        let grants = Self::get_grants(&api, "ROLE", name, false).await?;
-        let future_grants = Self::get_grants(&api, "ROLE", name, true).await?;
+        let grants = Self::get_grants(api, "ROLE", name, false).await?;
+        let future_grants = Self::get_grants(api, "ROLE", name, true).await?;
 
         Ok(Some(SnowflakeRole {
             owner,
@@ -374,7 +374,7 @@ impl SnowflakeConnector {
                 };
 
                 let name = name.strip_prefix("\"").unwrap_or(&name);
-                let name = name.strip_suffix("\"").unwrap_or(&name);
+                let name = name.strip_suffix("\"").unwrap_or(name);
 
                 let Ok(Some(privilege)): Result<Option<String>, _> = row.get_as("privilege") else {
                     continue;
@@ -388,7 +388,7 @@ impl SnowflakeConnector {
                     continue;
                 }
 
-                let Some(object_type) = ObjectType::from_str(&object_type, &name) else {
+                let Some(object_type) = ObjectType::from_str(&object_type, name) else {
                     continue;
                 };
                 granted_roles.push((privilege, object_type));
@@ -420,7 +420,7 @@ impl SnowflakeConnector {
                     continue;
                 };
                 let role_name = role_name.strip_prefix("\"").unwrap_or(&role_name);
-                let role_name = role_name.strip_suffix("\"").unwrap_or(&role_name);
+                let role_name = role_name.strip_suffix("\"").unwrap_or(role_name);
                 if !role_name.is_empty() {
                     granted_roles.push(role_name.to_string());
                 }
@@ -451,7 +451,7 @@ impl SnowflakeConnector {
                         continue;
                     };
                     let role_name = role_name.strip_prefix("\"").unwrap_or(&role_name);
-                    let role_name = role_name.strip_suffix("\"").unwrap_or(&role_name);
+                    let role_name = role_name.strip_suffix("\"").unwrap_or(role_name);
                     if !role_name.is_empty() {
                         granted_roles.push(role_name.to_string());
                     }

@@ -44,7 +44,7 @@ pub struct RecordRef<'a> {
 
 impl<'a> RecordRef<'a> {
     fn col_index(&self, name: &str) -> Option<usize> {
-        self.schema.iter().position(|c| &c.name == name)
+        self.schema.iter().position(|c| c.name == name)
     }
 
     pub fn get(&self, name: &str) -> Option<&'a Value> {
