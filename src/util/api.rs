@@ -3,14 +3,14 @@ use std::sync::Arc;
 use anyhow::bail;
 use arrow::array::StringArray;
 use autoschematic_core::connector::GetResourceResponse;
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 use snowflake_api::{JsonResult, QueryResult, SnowflakeApi};
 use sqlparser::ast::{DescribeAlias, Statement};
 
 use crate::{
     connector::SnowflakeConnector,
     error::SnowflakeConnectorError,
-    resource::{SnowflakeRole, SnowflakeUser},
+    resource::{ObjectType, SnowflakeRole, SnowflakeUser},
     util::record::JsonResultExt,
 };
 
@@ -41,10 +41,10 @@ impl SnowflakeConnector {
 
     pub async fn get_ddl(&self, object_type: &str, name: &str) -> Result<Option<GetResourceResponse>, anyhow::Error> {
         let api = self.get_api(None, None).await?;
-        let res = api.exec(&format!("SELECT GET_DDL('{}', '{}');", object_type, name)).await?;
+        let res = api.exec(&format!("SELECT GET_DDL('{}', '{}');", object_type, name)).await;
 
         match res {
-            snowflake_api::QueryResult::Arrow(arrow) => {
+            Ok(snowflake_api::QueryResult::Arrow(arrow)) => {
                 tracing::warn!("SELECT GET DDL: arrow {:?}", arrow);
                 let ddl = arrow.first().unwrap().column(0);
                 let ddl: StringArray = ddl.to_data().into();
@@ -59,14 +59,23 @@ impl SnowflakeConnector {
 
                 return Ok(Some(GetResourceResponse {
                     resource_definition: first_statement.into_bytes(),
+                    virt_addr: None,
                     outputs: None,
                 }));
             }
-            snowflake_api::QueryResult::Empty => {
+            Ok(snowflake_api::QueryResult::Empty) => {
                 tracing::warn!("SELECT GET DDL: EMPTY????");
             }
-            snowflake_api::QueryResult::Json(json) => {
+            Ok(snowflake_api::QueryResult::Json(json)) => {
                 tracing::warn!("SELECT GET DDL: json {}", json.value);
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                tracing::debug!("describe_if_exists: e: {err_str}");
+                if err_str.contains("does not exist") {
+                    return Ok(None);
+                }
+                return Err(e.into());
             }
         }
 
@@ -125,16 +134,14 @@ impl SnowflakeConnector {
             Ok(snowflake_api::QueryResult::Arrow(_)) => {
                 bail!(SnowflakeConnectorError::UnexpectedArrowResult)
             }
-            Ok(snowflake_api::QueryResult::Empty) => {
-                return Ok(None);
-            }
+            Ok(snowflake_api::QueryResult::Empty) => Ok(None),
             Err(e) => {
                 let err_str = e.to_string();
                 tracing::debug!("describe_if_exists: e: {err_str}");
                 if err_str.contains("does not exist") {
                     return Ok(None);
                 }
-                return Err(e.into());
+                Err(e.into())
             }
         }
     }
@@ -240,6 +247,8 @@ impl SnowflakeConnector {
             rsa_public_key_2: None,
             comment: None,
             granted_roles: IndexSet::new(),
+            grants: IndexMap::new(),
+            future_grants: IndexMap::new(),
         };
 
         for row in json_result.iter_records()? {
@@ -263,7 +272,7 @@ impl SnowflakeConnector {
                 "DEFAULT_WAREHOUSE" => user.default_warehouse = value_opt,
                 "DEFAULT_NAMESPACE" => user.default_namespace = value_opt,
                 "DEFAULT_ROLE" => user.default_role = value_opt,
-                "DEFAULT_SECONDARY_ROLES" => user.default_secondary_roles = value_opt,
+                // "DEFAULT_SECONDARY_ROLES" => user.default_secondary_roles = value_opt,
                 "DISABLED" => user.disabled = value == "true",
                 "RSA_PUBLIC_KEY" => user.rsa_public_key = value_opt,
                 "RSA_PUBLIC_KEY_2" => user.rsa_public_key_2 = value_opt,
@@ -273,7 +282,9 @@ impl SnowflakeConnector {
         }
 
         // Fetch roles granted to this user
-        user.granted_roles = Self::get_user_granted_roles(&api, name).await?;
+        user.granted_roles = Self::get_user_granted_roles(api, name).await?;
+
+        user.grants = Self::get_grants(api, "USER", name, false).await?;
         Ok(Some(user))
     }
 
@@ -325,12 +336,72 @@ impl SnowflakeConnector {
 
         // Get roles granted to this role via SHOW GRANTS
         let granted_roles = Self::get_role_granted_roles(api, name).await?;
+        let grants = Self::get_grants(api, "ROLE", name, false).await?;
+        let future_grants = Self::get_grants(api, "ROLE", name, true).await?;
 
         Ok(Some(SnowflakeRole {
             owner,
             comment,
             granted_roles,
+            grants,
+            future_grants,
         }))
+    }
+
+    async fn get_grants(
+        api: &SnowflakeApi,
+        target_type: &str,
+        target_name: &str,
+        future: bool,
+    ) -> Result<IndexMap<String, Vec<ObjectType>>, anyhow::Error> {
+        let mut granted_roles = Vec::new();
+
+        // SHOW GRANTS TO USER returns: created_on, role, granted_to, grantee_name, granted_by
+        let query = if future {
+            format!("SHOW FUTURE GRANTS TO {} \"{}\";", target_type, target_name)
+        } else {
+            format!("SHOW GRANTS TO {} \"{}\";", target_type, target_name)
+        };
+
+        if let Ok(QueryResult::Json(json_result)) = api.exec(&query).await {
+            for row in json_result.iter_records()? {
+                let row = row?;
+
+                let Ok(Some(name)): Result<Option<String>, _> = row.get_as("name") else {
+                    continue;
+                };
+
+                let name = name.strip_prefix("\"").unwrap_or(&name);
+                let name = name.strip_suffix("\"").unwrap_or(name);
+
+                let Ok(Some(privilege)): Result<Option<String>, _> = row.get_as("privilege") else {
+                    continue;
+                };
+
+                let Ok(Some(object_type)): Result<Option<String>, _> = row.get_as("granted_on") else {
+                    continue;
+                };
+
+                if object_type == "ROLE" && privilege == "USAGE" {
+                    continue;
+                }
+
+                let Some(object_type) = ObjectType::from_str(&object_type, name) else {
+                    continue;
+                };
+                granted_roles.push((privilege, object_type));
+            }
+        }
+
+        granted_roles.sort();
+
+        let mut out_map: IndexMap<String, Vec<ObjectType>> = IndexMap::new();
+
+        for (privilege, object_type) in granted_roles {
+            out_map.entry(privilege).or_default().push(object_type);
+        }
+
+        Ok(out_map)
     }
 
     /// Get roles granted to a user via SHOW GRANTS TO USER.
@@ -347,7 +418,7 @@ impl SnowflakeConnector {
                     continue;
                 };
                 let role_name = role_name.strip_prefix("\"").unwrap_or(&role_name);
-                let role_name = role_name.strip_suffix("\"").unwrap_or(&role_name);
+                let role_name = role_name.strip_suffix("\"").unwrap_or(role_name);
                 if !role_name.is_empty() {
                     granted_roles.push(role_name.to_string());
                 }
@@ -356,7 +427,7 @@ impl SnowflakeConnector {
 
         granted_roles.sort();
 
-        Ok(IndexSet::from_iter(granted_roles.into_iter()))
+        Ok(IndexSet::from_iter(granted_roles))
     }
 
     /// Get roles granted to a role via SHOW GRANTS TO ROLE.
@@ -364,7 +435,6 @@ impl SnowflakeConnector {
         let mut granted_roles = Vec::new();
 
         // SHOW GRANTS TO ROLE returns: created_on, privilege, granted_on, name, granted_to, grantee_name, grant_option, granted_by
-        // We filter for privilege="USAGE" and granted_on="ROLE" to get role membership grants
         let query = format!("SHOW GRANTS TO ROLE \"{}\";", role_name);
 
         if let Ok(QueryResult::Json(json_result)) = api.exec(&query).await {
@@ -373,12 +443,13 @@ impl SnowflakeConnector {
                 let privilege: String = row.require_as("privilege")?;
                 let granted_on: String = row.require_as("granted_on")?;
 
+                // We filter for privilege="USAGE" and granted_on="ROLE" to get role membership grants.
                 if privilege == "USAGE" && granted_on == "ROLE" {
                     let Some(role_name): Option<String> = row.get_as("name")? else {
                         continue;
                     };
                     let role_name = role_name.strip_prefix("\"").unwrap_or(&role_name);
-                    let role_name = role_name.strip_suffix("\"").unwrap_or(&role_name);
+                    let role_name = role_name.strip_suffix("\"").unwrap_or(role_name);
                     if !role_name.is_empty() {
                         granted_roles.push(role_name.to_string());
                     }
@@ -388,6 +459,6 @@ impl SnowflakeConnector {
 
         granted_roles.sort();
 
-        Ok(IndexSet::from_iter(granted_roles.into_iter()))
+        Ok(IndexSet::from_iter(granted_roles))
     }
 }
