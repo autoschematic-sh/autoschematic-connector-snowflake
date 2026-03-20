@@ -2,7 +2,7 @@
 name = "autoschematic-connector-snowflake"
 description = "An Autoschematic connector for Snowflake RBAC & DDL resources"
 license = "AGPL-3.0"
-version = "0.14.3"
+version = "0.14.4"
 edition = "2024"
 authors = ["Peter Sherman <peter@autoschematic.sh>"]
 repository = "https://github.com/autoschematic-sh/autoschematic-connector-snowflake"
