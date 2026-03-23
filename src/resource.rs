@@ -201,10 +201,6 @@ pub struct SnowflakeUser {
     /// Object grants granted to this user.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub grants: IndexMap<String, Vec<ObjectType>>,
-
-    /// Future grants granted to this user.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub future_grants: IndexMap<String, Vec<ObjectType>>,
 }
 
 impl Resource for SnowflakeUser {
@@ -225,13 +221,21 @@ impl Resource for SnowflakeUser {
     }
 }
 
+fn skip_owner(owner: &Option<String>) -> bool {
+    match owner {
+        Some(s) if s == "ACCOUNTADMIN" => true,
+        None => true,
+        _ => false,
+    }
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Documented, DocumentedFields, FieldTypes)]
 #[serde(deny_unknown_fields)]
 /// Represents a Snowflake role.
 /// Properties map to Snowflake's ALTER ROLE / CREATE ROLE parameters.
 pub struct SnowflakeRole {
     /// Owner of the role.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "skip_owner")]
     pub owner: Option<String>,
     /// Comment/description for the role.
     #[serde(skip_serializing_if = "Option::is_none")]
