@@ -3,10 +3,11 @@ use std::path::Path;
 use autoschematic_core::{
     connector::{ConnectorOp, PlanResponseElement, Resource, ResourceAddress},
     connector_op,
+    util::diff_ron_values,
 };
 use indexmap::IndexMap;
 
-use crate::{addr::SnowflakeResourceAddress, connector::PrivilegeTargetKind, op::*, resource::*};
+use crate::{addr::SnowflakeResourceAddress, connector::PrivilegeTargetKind, op::*, resource::*, util};
 
 use crate::connector::SnowflakeConnector;
 
@@ -29,6 +30,29 @@ impl SnowflakeConnector {
                         SnowflakeConnectorOp::Delete,
                         format!("DROP DATABASE `{}`", name)
                     ));
+                    Ok(res)
+                }
+                (Some(_), Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE DATABASE `{}`", name)
+                    ));
+                    Ok(res)
+                }
+                (None, Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE DATABASE `{}`", name)
+                    ));
+                    Ok(res)
+                }
+            },
+            SnowflakeResourceAddress::Schema { name, .. } => match (current, desired) {
+                (None, None) => Ok(Vec::new()),
+                (Some(_), None) => {
+                    res.push(connector_op!(SnowflakeConnectorOp::Delete, format!("DROP SCHEMA `{}`", name)));
                     Ok(res)
                 }
                 (Some(_), Some(definition)) => {
@@ -84,12 +108,13 @@ impl SnowflakeConnector {
                         let old_user: SnowflakeUser = SnowflakeUser::from_bytes(&addr, &old_user_bytes)?;
                         let new_user: SnowflakeUser = SnowflakeUser::from_bytes(&addr, &new_user_bytes)?;
 
-                        let old_props = Self::user_properties_only(&old_user);
-                        let new_props = Self::user_properties_only(&new_user);
+                        let old_props = util::user_properties_only(&old_user);
+                        let new_props = util::user_properties_only(&new_user);
                         if old_props != new_props {
+                            let diff = diff_ron_values(&old_props, &new_props).unwrap_or_default();
                             res.push(connector_op!(
                                 SnowflakeConnectorOp::AlterUser(Box::new(old_user.clone()), Box::new(new_user.clone())),
-                                format!("Alter Snowflake user `{}`", name)
+                                format!("Alter Snowflake user `{name}\n{diff}`")
                             ));
                         }
 
@@ -175,10 +200,14 @@ impl SnowflakeConnector {
                         let old_role: SnowflakeRole = SnowflakeRole::from_bytes(&addr, &old_role_bytes)?;
                         let new_role: SnowflakeRole = SnowflakeRole::from_bytes(&addr, &new_role_bytes)?;
 
-                        if Self::role_properties_only(&old_role) != Self::role_properties_only(&new_role) {
+                        let old_props = util::role_properties_only(&old_role);
+                        let new_props = util::role_properties_only(&new_role);
+
+                        if old_props != new_props {
+                            let diff = diff_ron_values(&old_props, &new_props).unwrap_or_default();
                             res.push(connector_op!(
                                 SnowflakeConnectorOp::AlterRole(Box::new(old_role.clone()), Box::new(new_role.clone())),
-                                format!("Alter Snowflake role `{}`", name)
+                                format!("Alter Snowflake role `{name}`\n{diff}")
                             ));
                         }
 

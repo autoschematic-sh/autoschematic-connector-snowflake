@@ -6,7 +6,10 @@ use autoschematic_core::connector::{ConnectorOp, OpExecResponse, ResourceAddress
 use crate::{
     addr::SnowflakeResourceAddress,
     op::*,
-    util::sql::{self, build_alter_role_sql, build_create_role_sql, build_transfer_role_ownership_sql},
+    util::{
+        self,
+        sql::{self, build_alter_role_sql, build_create_role_sql, build_transfer_role_ownership_sql},
+    },
 };
 
 use crate::connector::SnowflakeConnector;
@@ -156,7 +159,7 @@ impl SnowflakeConnector {
                             friendly_message: Some(format!(
                                 "Granted {} on {} to user `{}`",
                                 privilege,
-                                Self::describe_object_type(&object_type, future),
+                                util::describe_object_type(&object_type, future),
                                 name
                             )),
                         })
@@ -173,7 +176,7 @@ impl SnowflakeConnector {
                             friendly_message: Some(format!(
                                 "Revoked {} on {} from user `{}`",
                                 privilege,
-                                Self::describe_object_type(&object_type, future),
+                                util::describe_object_type(&object_type, future),
                                 name
                             )),
                         })
@@ -238,7 +241,7 @@ impl SnowflakeConnector {
                             friendly_message: Some(format!(
                                 "Granted {} on {} to role `{}`",
                                 privilege,
-                                Self::describe_object_type(&object_type, future),
+                                util::describe_object_type(&object_type, future),
                                 name
                             )),
                         })
@@ -255,7 +258,7 @@ impl SnowflakeConnector {
                             friendly_message: Some(format!(
                                 "Revoked {} on {} from role `{}`",
                                 privilege,
-                                Self::describe_object_type(&object_type, future),
+                                util::describe_object_type(&object_type, future),
                                 name
                             )),
                         })
