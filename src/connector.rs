@@ -1,11 +1,11 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     env,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, Error, bail};
+use anyhow::{Context, Error};
 use async_trait::async_trait;
 use autoschematic_core::{
     connector::{
@@ -26,8 +26,11 @@ use crate::{
     addr::SnowflakeResourceAddress,
     op::*,
     resource::*,
-    util::sql::{self, build_alter_role_sql, build_create_role_sql, build_transfer_role_ownership_sql},
 };
+
+mod op_exec;
+mod plan;
+
 /// Configuration for the Snowflake connector, loaded during init().
 #[derive(Clone)]
 pub struct SnowflakeConnectorConfig {
@@ -44,13 +47,13 @@ pub struct SnowflakeConnector {
 }
 
 #[derive(Clone, Copy)]
-enum PrivilegeTargetKind {
+pub enum PrivilegeTargetKind {
     User,
     Role,
 }
 
 impl PrivilegeTargetKind {
-    fn display_name(self) -> &'static str {
+    pub fn display_name(self) -> &'static str {
         match self {
             PrivilegeTargetKind::User => "user",
             PrivilegeTargetKind::Role => "role",
@@ -60,7 +63,7 @@ impl PrivilegeTargetKind {
 
 impl SnowflakeConnector {
     async fn current_session_role(&self) -> Option<String> {
-        self.config.lock().await.as_ref().map(|config| config.role.clone())
+        Some(self.config.lock().await.as_ref()?.role.clone())
     }
 
     fn flatten_grants(grants: &IndexMap<String, Vec<ObjectType>>) -> BTreeSet<(String, ObjectType)> {
@@ -76,19 +79,10 @@ impl SnowflakeConnector {
             .collect()
     }
 
-    fn validate_user(user: &SnowflakeUser) -> Result<(), anyhow::Error> {
-        if !user.future_grants.is_empty() {
-            bail!("Snowflake does not support FUTURE grants directly to users");
-        }
-
-        Ok(())
-    }
-
     fn user_properties_only(user: &SnowflakeUser) -> SnowflakeUser {
         SnowflakeUser {
             granted_roles: IndexSet::new(),
             grants: IndexMap::new(),
-            future_grants: IndexMap::new(),
             ..user.clone()
         }
     }
@@ -153,6 +147,7 @@ impl SnowflakeConnector {
         let old_specs = Self::flatten_grants(old_grants);
         let new_specs = Self::flatten_grants(new_grants);
 
+        // Compute the privileges to grant...
         for (privilege, object_type) in new_specs.difference(&old_specs) {
             res.push(connector_op!(
                 SnowflakeConnectorOp::GrantPrivilege {
@@ -170,6 +165,7 @@ impl SnowflakeConnector {
             ));
         }
 
+        // Compute the privileges to revoke...
         for (privilege, object_type) in old_specs.difference(&new_specs) {
             res.push(connector_op!(
                 SnowflakeConnectorOp::RevokePrivilege {
@@ -329,480 +325,11 @@ impl Connector for SnowflakeConnector {
         current: Option<Vec<u8>>,
         desired: Option<Vec<u8>>,
     ) -> Result<Vec<PlanResponseElement>, anyhow::Error> {
-        tracing::info!("plan {:?} -? {:?}", current, desired);
-        let addr = SnowflakeResourceAddress::from_path(addr)?;
-
-        let mut res = Vec::new();
-
-        match &addr {
-            SnowflakeResourceAddress::Database { name } => match (current, desired) {
-                (None, None) => Ok(Vec::new()),
-                (Some(_), None) => {
-                    res.push(connector_op!(
-                        SnowflakeConnectorOp::Delete,
-                        format!("DROP DATABASE `{}`", name)
-                    ));
-                    Ok(res)
-                }
-                (Some(_), Some(definition)) => {
-                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
-                    res.push(connector_op!(
-                        SnowflakeConnectorOp::Execute(definition),
-                        format!("CREATE OR REPLACE DATABASE `{}`", name)
-                    ));
-                    Ok(res)
-                }
-                (None, Some(definition)) => {
-                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
-                    res.push(connector_op!(
-                        SnowflakeConnectorOp::Execute(definition),
-                        format!("CREATE OR REPLACE DATABASE `{}`", name)
-                    ));
-                    Ok(res)
-                }
-            },
-            SnowflakeResourceAddress::User { name } => {
-                match (current, desired) {
-                    (None, None) => {}
-                    (None, Some(new_user_bytes)) => {
-                        let new_user: SnowflakeUser = SnowflakeUser::from_bytes(&addr, &new_user_bytes)?;
-                        Self::validate_user(&new_user)?;
-                        let roles_to_grant = new_user.granted_roles.clone();
-                        let grants_to_apply = new_user.grants.clone();
-                        res.push(connector_op!(
-                            SnowflakeConnectorOp::CreateUser(Box::new(new_user.clone())),
-                            format!("Create Snowflake user `{}`", name)
-                        ));
-                        for role in roles_to_grant {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::GrantRoleToUser(role.clone()),
-                                format!("Grant role `{}` to user `{}`", role, name)
-                            ));
-                        }
-                        Self::extend_privilege_plan(
-                            &mut res,
-                            PrivilegeTargetKind::User,
-                            name,
-                            &IndexMap::new(),
-                            &grants_to_apply,
-                            false,
-                        )?;
-                    }
-                    (Some(_old_user_bytes), None) => {
-                        res.push(connector_op!(
-                            SnowflakeConnectorOp::DropUser,
-                            format!("Drop Snowflake user `{}`", name)
-                        ));
-                    }
-                    (Some(old_user_bytes), Some(new_user_bytes)) => {
-                        let old_user: SnowflakeUser = SnowflakeUser::from_bytes(&addr, &old_user_bytes)?;
-                        let new_user: SnowflakeUser = SnowflakeUser::from_bytes(&addr, &new_user_bytes)?;
-                        Self::validate_user(&new_user)?;
-
-                        let old_props = Self::user_properties_only(&old_user);
-                        let new_props = Self::user_properties_only(&new_user);
-                        if old_props != new_props {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::AlterUser(Box::new(old_user.clone()), Box::new(new_user.clone())),
-                                format!("Alter Snowflake user `{}`", name)
-                            ));
-                        }
-
-                        for role in new_user.granted_roles.difference(&old_user.granted_roles) {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::GrantRoleToUser(role.clone()),
-                                format!("Grant role `{}` to user `{}`", role, name)
-                            ));
-                        }
-                        for role in old_user.granted_roles.difference(&new_user.granted_roles) {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::RevokeRoleFromUser(role.clone()),
-                                format!("Revoke role `{}` from user `{}`", role, name)
-                            ));
-                        }
-
-                        Self::extend_privilege_plan(
-                            &mut res,
-                            PrivilegeTargetKind::User,
-                            name,
-                            &old_user.grants,
-                            &new_user.grants,
-                            false,
-                        )?;
-                    }
-                }
-                Ok(res)
-            }
-            SnowflakeResourceAddress::Role { name } => {
-                match (current, desired) {
-                    (None, None) => {}
-                    (None, Some(new_role_bytes)) => {
-                        let new_role: SnowflakeRole = SnowflakeRole::from_bytes(&addr, &new_role_bytes)?;
-                        let roles_to_grant = new_role.granted_roles.clone();
-                        let grants_to_apply = new_role.grants.clone();
-                        let future_grants_to_apply = new_role.future_grants.clone();
-                        let desired_owner = new_role.owner.clone();
-                        let session_role = self.current_session_role().await;
-                        res.push(connector_op!(
-                            SnowflakeConnectorOp::CreateRole(Box::new(new_role.clone())),
-                            format!("Create Snowflake role `{}`", name)
-                        ));
-                        for role in roles_to_grant {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::GrantRoleToRole(role.clone()),
-                                format!("Grant role `{}` to role `{}`", role, name)
-                            ));
-                        }
-                        Self::extend_privilege_plan(
-                            &mut res,
-                            PrivilegeTargetKind::Role,
-                            name,
-                            &IndexMap::new(),
-                            &grants_to_apply,
-                            false,
-                        )?;
-                        Self::extend_privilege_plan(
-                            &mut res,
-                            PrivilegeTargetKind::Role,
-                            name,
-                            &IndexMap::new(),
-                            &future_grants_to_apply,
-                            true,
-                        )?;
-
-                        if let Some(owner) = desired_owner
-                            && session_role.as_deref() != Some(owner.as_str())
-                        {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
-                                format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
-                            ));
-                        }
-                    }
-                    (Some(_old_role_bytes), None) => {
-                        res.push(connector_op!(
-                            SnowflakeConnectorOp::DropRole,
-                            format!("Drop Snowflake role `{}`", name)
-                        ));
-                    }
-                    (Some(old_role_bytes), Some(new_role_bytes)) => {
-                        let old_role: SnowflakeRole = SnowflakeRole::from_bytes(&addr, &old_role_bytes)?;
-                        let new_role: SnowflakeRole = SnowflakeRole::from_bytes(&addr, &new_role_bytes)?;
-
-                        if Self::role_properties_only(&old_role) != Self::role_properties_only(&new_role) {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::AlterRole(Box::new(old_role.clone()), Box::new(new_role.clone())),
-                                format!("Alter Snowflake role `{}`", name)
-                            ));
-                        }
-
-                        for role in new_role.granted_roles.difference(&old_role.granted_roles) {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::GrantRoleToRole(role.clone()),
-                                format!("Grant role `{}` to role `{}`", role, name)
-                            ));
-                        }
-                        for role in old_role.granted_roles.difference(&new_role.granted_roles) {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::RevokeRoleFromRole(role.clone()),
-                                format!("Revoke role `{}` from role `{}`", role, name)
-                            ));
-                        }
-
-                        Self::extend_privilege_plan(
-                            &mut res,
-                            PrivilegeTargetKind::Role,
-                            name,
-                            &old_role.grants,
-                            &new_role.grants,
-                            false,
-                        )?;
-                        Self::extend_privilege_plan(
-                            &mut res,
-                            PrivilegeTargetKind::Role,
-                            name,
-                            &old_role.future_grants,
-                            &new_role.future_grants,
-                            true,
-                        )?;
-
-                        if old_role.owner != new_role.owner
-                            && let Some(owner) = new_role.owner.clone()
-                        {
-                            res.push(connector_op!(
-                                SnowflakeConnectorOp::TransferRoleOwnership(owner.clone()),
-                                format!("Transfer Snowflake role `{}` ownership to `{}`", name, owner)
-                            ));
-                        }
-                    }
-                }
-                Ok(res)
-            }
-            _ => Ok(vec![]),
-        }
+        self.do_plan(addr, current, desired).await
     }
 
     async fn op_exec(&self, addr: &Path, op: &str) -> Result<OpExecResponse, anyhow::Error> {
-        let op = SnowflakeConnectorOp::from_str(op)?;
-        let addr = SnowflakeResourceAddress::from_path(addr)?;
-
-        match addr {
-            SnowflakeResourceAddress::Warehouse { name } => {
-                let api = self.get_api(None, None).await?;
-                match &op {
-                    SnowflakeConnectorOp::Execute(def) => {
-                        let _res = api.exec(&def.statement.to_string()).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", def.statement)),
-                        })
-                    }
-                    SnowflakeConnectorOp::Delete => {
-                        let statement = format!("DROP WAREHOUSE {};", name);
-                        let _res = api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", statement)),
-                        })
-                    }
-                    _ => bail!("Invalid operation for Warehouse address"),
-                }
-            }
-            SnowflakeResourceAddress::Database { name } => {
-                let api = self.get_api(None, None).await?;
-                match &op {
-                    SnowflakeConnectorOp::Execute(def) => {
-                        let _res = api.exec(&def.statement.to_string()).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", def.statement)),
-                        })
-                    }
-                    SnowflakeConnectorOp::Delete => {
-                        let statement = format!("DROP DATABASE {};", name);
-                        let _res = api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", statement)),
-                        })
-                    }
-                    _ => bail!("Invalid operation for Database address"),
-                }
-            }
-            SnowflakeResourceAddress::Schema { database, name } => {
-                let api = self.get_api(Some(&database), None).await?;
-                match &op {
-                    SnowflakeConnectorOp::Execute(def) => {
-                        let _res = api.exec(&def.statement.to_string()).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", def.statement)),
-                        })
-                    }
-                    SnowflakeConnectorOp::Delete => {
-                        let statement = format!("DROP SCHEMA {}.{};", database, name);
-                        let _res = api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", statement)),
-                        })
-                    }
-                    _ => bail!("Invalid operation for Schema address"),
-                }
-            }
-            SnowflakeResourceAddress::Table { database, schema, name } => {
-                let api = self.get_api(Some(&database), Some(&schema)).await?;
-                match &op {
-                    SnowflakeConnectorOp::Execute(def) => {
-                        let _res = api.exec(&def.statement.to_string()).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", def.statement)),
-                        })
-                    }
-                    SnowflakeConnectorOp::Delete => {
-                        let statement = format!("DROP TABLE {}.{}.{};", database, schema, name);
-                        let _res = api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Success: {}", statement)),
-                        })
-                    }
-                    _ => bail!("Invalid operation for Table address"),
-                }
-            }
-            SnowflakeResourceAddress::User { name } => {
-                let api = self.get_api(None, None).await?;
-                match op {
-                    SnowflakeConnectorOp::CreateUser(user) => {
-                        let statement = sql::build_create_user_sql(&name, &user);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Created Snowflake user `{}`", name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::AlterUser(_old_user, new_user) => {
-                        let statement = sql::build_alter_user_sql(&name, &new_user);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Altered Snowflake user `{}`", name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::DropUser => {
-                        let statement = format!("DROP USER \"{}\";", name);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Dropped Snowflake user `{}`", name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::GrantRoleToUser(role_name) => {
-                        let statement = format!("GRANT ROLE \"{}\" TO USER \"{}\";", role_name, name);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Granted role `{}` to user `{}`", role_name, name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::RevokeRoleFromUser(role_name) => {
-                        let statement = format!("REVOKE ROLE \"{}\" FROM USER \"{}\";", role_name, name);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Revoked role `{}` from user `{}`", role_name, name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::GrantPrivilege {
-                        privilege,
-                        object_type,
-                        future,
-                    } => {
-                        let statement = sql::build_grant_privilege_sql("USER", &name, &privilege, &object_type, future)?;
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!(
-                                "Granted {} on {} to user `{}`",
-                                privilege,
-                                Self::describe_object_type(&object_type, future),
-                                name
-                            )),
-                        })
-                    }
-                    SnowflakeConnectorOp::RevokePrivilege {
-                        privilege,
-                        object_type,
-                        future,
-                    } => {
-                        let statement = sql::build_revoke_privilege_sql("USER", &name, &privilege, &object_type, future)?;
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!(
-                                "Revoked {} on {} from user `{}`",
-                                privilege,
-                                Self::describe_object_type(&object_type, future),
-                                name
-                            )),
-                        })
-                    }
-                    _ => bail!("Invalid operation for User address"),
-                }
-            }
-            SnowflakeResourceAddress::Role { name } => {
-                let api = self.get_api(None, None).await?;
-                match op {
-                    SnowflakeConnectorOp::CreateRole(role) => {
-                        let statement = build_create_role_sql(&name, &role);
-                        api.exec(&statement).await?;
-
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Created Snowflake role `{}`", name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::AlterRole(_old_role, new_role) => {
-                        // Update comment (grants are handled as separate ops)
-                        let statement = build_alter_role_sql(&name, &new_role);
-                        api.exec(&statement).await?;
-
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Altered Snowflake role `{}`", name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::DropRole => {
-                        let statement = format!("DROP ROLE \"{}\";", name);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Dropped Snowflake role `{}`", name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::GrantRoleToRole(role_name) => {
-                        let statement = format!("GRANT ROLE \"{}\" TO ROLE \"{}\";", role_name, name);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Granted role `{}` to role `{}`", role_name, name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::RevokeRoleFromRole(role_name) => {
-                        let statement = format!("REVOKE ROLE \"{}\" FROM ROLE \"{}\";", role_name, name);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Revoked role `{}` from role `{}`", role_name, name)),
-                        })
-                    }
-                    SnowflakeConnectorOp::GrantPrivilege {
-                        privilege,
-                        object_type,
-                        future,
-                    } => {
-                        let statement = sql::build_grant_privilege_sql("ROLE", &name, &privilege, &object_type, future)?;
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!(
-                                "Granted {} on {} to role `{}`",
-                                privilege,
-                                Self::describe_object_type(&object_type, future),
-                                name
-                            )),
-                        })
-                    }
-                    SnowflakeConnectorOp::RevokePrivilege {
-                        privilege,
-                        object_type,
-                        future,
-                    } => {
-                        let statement = sql::build_revoke_privilege_sql("ROLE", &name, &privilege, &object_type, future)?;
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!(
-                                "Revoked {} on {} from role `{}`",
-                                privilege,
-                                Self::describe_object_type(&object_type, future),
-                                name
-                            )),
-                        })
-                    }
-                    SnowflakeConnectorOp::TransferRoleOwnership(owner) => {
-                        let statement = build_transfer_role_ownership_sql(&name, &owner);
-                        api.exec(&statement).await?;
-                        Ok(OpExecResponse {
-                            outputs: Some(HashMap::new()),
-                            friendly_message: Some(format!("Transferred Snowflake role `{}` ownership to `{}`", name, owner)),
-                        })
-                    }
-                    _ => bail!("Invalid operation for Role address"),
-                }
-            }
-        }
+        self.do_op_exec(addr, op).await
     }
 
     async fn get_docstring(&self, _addr: &Path, ident: DocIdent) -> anyhow::Result<Option<GetDocResponse>> {
@@ -851,27 +378,7 @@ impl Connector for SnowflakeConnector {
 
         match parsed_addr {
             // RON-based resources (users, roles)
-            addr @ SnowflakeResourceAddress::User { .. } => {
-                let mut response = ron_check_syntax::<SnowflakeUser>(a)?;
-
-                if let Some(ref mut response) = response
-                    && response.diagnostics.is_empty()
-                {
-                    let user = SnowflakeUser::from_bytes(&addr, a)?;
-                    if !user.future_grants.is_empty() {
-                        response.diagnostics.push(Diagnostic {
-                            severity: DiagnosticSeverity::ERROR as u8,
-                            span: DiagnosticSpan {
-                                start: DiagnosticPosition { line: 1, col: 1 },
-                                end: DiagnosticPosition { line: 1, col: 1 },
-                            },
-                            message: "Snowflake does not support FUTURE grants directly to users".into(),
-                        });
-                    }
-                }
-
-                Ok(response)
-            }
+            SnowflakeResourceAddress::User { .. } => ron_check_syntax::<SnowflakeUser>(a),
             SnowflakeResourceAddress::Role { .. } => ron_check_syntax::<SnowflakeRole>(a),
             // SQL-based resources (warehouses, databases, schemas, tables)
             _ => {
@@ -940,18 +447,5 @@ mod tests {
         assert!(flattened.contains(&("USAGE".into(), ObjectType::DATABASE("RAW".into()))));
         assert!(flattened.contains(&("USAGE".into(), ObjectType::SCHEMA("RAW.PUBLIC".into()))));
         assert!(flattened.contains(&("SELECT".into(), ObjectType::TABLE("RAW.PUBLIC.EVENTS".into()))));
-    }
-
-    #[test]
-    fn users_reject_future_grants() {
-        let mut user = SnowflakeUser::default();
-        user.future_grants
-            .insert("SELECT".into(), vec![ObjectType::TABLE("RAW.PUBLIC".into())]);
-
-        let err = SnowflakeConnector::validate_user(&user).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Snowflake does not support FUTURE grants directly to users")
-        );
     }
 }
