@@ -78,7 +78,6 @@ pub fn describe_object_type(object_type: &ObjectType, future: bool) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
