@@ -42,7 +42,6 @@ impl SnowflakeConnector {
     pub async fn get_ddl(&self, object_type: &str, name: &str) -> Result<Option<GetResourceResponse>, anyhow::Error> {
         let api = self.get_api(None, None).await?;
         let res = api.exec(&format!("SELECT GET_DDL('{}', '{}');", object_type, name)).await;
-
         match res {
             Ok(snowflake_api::QueryResult::Arrow(arrow)) => {
                 tracing::warn!("SELECT GET DDL: arrow {:?}", arrow);
@@ -248,7 +247,6 @@ impl SnowflakeConnector {
             comment: None,
             granted_roles: IndexSet::new(),
             grants: IndexMap::new(),
-            future_grants: IndexMap::new(),
         };
 
         for row in json_result.iter_records()? {
