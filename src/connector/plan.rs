@@ -49,17 +49,20 @@ impl SnowflakeConnector {
                     Ok(res)
                 }
             },
-            SnowflakeResourceAddress::Schema { name, .. } => match (current, desired) {
+            SnowflakeResourceAddress::Schema { name, database } => match (current, desired) {
                 (None, None) => Ok(Vec::new()),
                 (Some(_), None) => {
-                    res.push(connector_op!(SnowflakeConnectorOp::Delete, format!("DROP SCHEMA `{}`", name)));
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Delete,
+                        format!("DROP SCHEMA `{database}.{name}`")
+                    ));
                     Ok(res)
                 }
                 (Some(_), Some(definition)) => {
                     let definition = SQLDefinition::from_bytes(&addr, &definition)?;
                     res.push(connector_op!(
                         SnowflakeConnectorOp::Execute(definition),
-                        format!("CREATE OR REPLACE DATABASE `{}`", name)
+                        format!("CREATE OR REPLACE SCHEMA `{database}.{name}`")
                     ));
                     Ok(res)
                 }
@@ -67,7 +70,33 @@ impl SnowflakeConnector {
                     let definition = SQLDefinition::from_bytes(&addr, &definition)?;
                     res.push(connector_op!(
                         SnowflakeConnectorOp::Execute(definition),
-                        format!("CREATE OR REPLACE DATABASE `{}`", name)
+                        format!("CREATE OR REPLACE SCHEMA `{database}.{name}`")
+                    ));
+                    Ok(res)
+                }
+            },
+            SnowflakeResourceAddress::Table { database, schema, name } => match (current, desired) {
+                (None, None) => Ok(Vec::new()),
+                (Some(_), None) => {
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Delete,
+                        format!("DROP TABLE `{database}.{schema}.{name}`")
+                    ));
+                    Ok(res)
+                }
+                (Some(_), Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE TABLE `{database}.{schema}.{name}`")
+                    ));
+                    Ok(res)
+                }
+                (None, Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE TABLE `{database}.{schema}.{name}`")
                     ));
                     Ok(res)
                 }
