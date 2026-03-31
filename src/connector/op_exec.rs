@@ -104,6 +104,27 @@ impl SnowflakeConnector {
                     _ => bail!("Invalid operation for Table address"),
                 }
             }
+            SnowflakeResourceAddress::FileFormat { database, schema, name } => {
+                let api = self.get_api(Some(&database), Some(&schema)).await?;
+                match &op {
+                    SnowflakeConnectorOp::Execute(def) => {
+                        let _res = api.exec(&def.statement.to_string()).await?;
+                        Ok(OpExecResponse {
+                            outputs: Some(HashMap::new()),
+                            friendly_message: Some(format!("Success: {}", def.statement)),
+                        })
+                    }
+                    SnowflakeConnectorOp::Delete => {
+                        let statement = format!("DROP TABLE {}.{}.{};", database, schema, name);
+                        let _res = api.exec(&statement).await?;
+                        Ok(OpExecResponse {
+                            outputs: Some(HashMap::new()),
+                            friendly_message: Some(format!("Success: {}", statement)),
+                        })
+                    }
+                    _ => bail!("Invalid operation for Table address"),
+                }
+            }
             SnowflakeResourceAddress::User { name } => {
                 let api = self.get_api(None, None).await?;
                 match op {

@@ -23,6 +23,32 @@ impl SnowflakeConnector {
         let mut res = Vec::new();
 
         match &addr {
+            SnowflakeResourceAddress::Warehouse { name } => match (current, desired) {
+                (None, None) => Ok(Vec::new()),
+                (Some(_), None) => {
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Delete,
+                        format!("DROP WAREHOUSE `{}`", name)
+                    ));
+                    Ok(res)
+                }
+                (Some(_), Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE WAREHOUSE `{}`", name)
+                    ));
+                    Ok(res)
+                }
+                (None, Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE WAREHOUSE `{}`", name)
+                    ));
+                    Ok(res)
+                }
+            },
             SnowflakeResourceAddress::Database { name } => match (current, desired) {
                 (None, None) => Ok(Vec::new()),
                 (Some(_), None) => {
@@ -97,6 +123,32 @@ impl SnowflakeConnector {
                     res.push(connector_op!(
                         SnowflakeConnectorOp::Execute(definition),
                         format!("CREATE OR REPLACE TABLE `{database}.{schema}.{name}`")
+                    ));
+                    Ok(res)
+                }
+            },
+            SnowflakeResourceAddress::FileFormat { database, schema, name } => match (current, desired) {
+                (None, None) => Ok(Vec::new()),
+                (Some(_), None) => {
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Delete,
+                        format!("DROP FILE FORMAT `{database}.{schema}.{name}`")
+                    ));
+                    Ok(res)
+                }
+                (Some(_), Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE FILE FORMAT `{database}.{schema}.{name}`")
+                    ));
+                    Ok(res)
+                }
+                (None, Some(definition)) => {
+                    let definition = SQLDefinition::from_bytes(&addr, &definition)?;
+                    res.push(connector_op!(
+                        SnowflakeConnectorOp::Execute(definition),
+                        format!("CREATE OR REPLACE FILE FORMAT `{database}.{schema}.{name}`")
                     ));
                     Ok(res)
                 }
@@ -282,7 +334,6 @@ impl SnowflakeConnector {
                 }
                 Ok(res)
             }
-            _ => Ok(vec![]),
         }
     }
 }
