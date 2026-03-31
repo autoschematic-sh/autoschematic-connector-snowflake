@@ -231,7 +231,8 @@ impl Connector for SnowflakeConnector {
                 self.get_ddl("TABLE", &format!("{}.{}.{}", database, schema, name)).await
             }
             SnowflakeResourceAddress::FileFormat { database, schema, name } => {
-                self.get_ddl("FILE_FORMAT", &format!("{}.{}.{}", database, schema, name)).await
+                self.get_ddl("FILE_FORMAT", &format!("{}.{}.{}", database, schema, name))
+                    .await
             }
             SnowflakeResourceAddress::User { name } => {
                 let api = self.get_api(None, None).await?;
