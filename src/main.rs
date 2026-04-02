@@ -2,6 +2,7 @@ use autoschematic_core::tarpc_bridge::tarpc_connector_main;
 use connector::SnowflakeConnector;
 
 pub mod addr;
+pub mod config;
 pub mod connector;
 pub mod error;
 pub mod op;

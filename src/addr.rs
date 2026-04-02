@@ -4,10 +4,12 @@ use autoschematic_core::{connector::ResourceAddress, error_util::invalid_addr_pa
 
 #[derive(Clone, Debug)]
 pub enum SnowflakeResourceAddress {
+    // DDL resources
     Warehouse { name: String },
     Database { name: String },
     Schema { database: String, name: String },
     Table { database: String, schema: String, name: String },
+    FileFormat { database: String, schema: String, name: String },
     // RBAC resources
     User { name: String },
     Role { name: String },
@@ -32,6 +34,10 @@ impl ResourceAddress for SnowflakeResourceAddress {
             SnowflakeResourceAddress::Table { database, schema, name } => {
                 PathBuf::from(format!("snowflake/databases/{}/{}/{}/table.sql", database, schema, name))
             }
+            SnowflakeResourceAddress::FileFormat { database, schema, name } => PathBuf::from(format!(
+                "snowflake/databases/{}/{}/file_formats/{}.sql",
+                database, schema, name
+            )),
             SnowflakeResourceAddress::User { name } => PathBuf::from(format!("snowflake/users/{}.ron", name)),
             SnowflakeResourceAddress::Role { name } => PathBuf::from(format!("snowflake/roles/{}.ron", name)),
         }
@@ -56,6 +62,13 @@ impl ResourceAddress for SnowflakeResourceAddress {
                 schema: schema.to_string(),
                 name: name.to_string(),
             }),
+            ["snowflake", "databases", database, schema, "file_formats", name] if name.ends_with(".sql") => {
+                Ok(SnowflakeResourceAddress::FileFormat {
+                    database: database.to_string(),
+                    schema: schema.to_string(),
+                    name: strip_sql_suffix(name),
+                })
+            }
             ["snowflake", "users", name] if name.ends_with(".ron") => Ok(SnowflakeResourceAddress::User {
                 name: strip_ron_suffix(name),
             }),

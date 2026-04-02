@@ -5,10 +5,13 @@ use arrow::array::StringArray;
 use autoschematic_core::connector::GetResourceResponse;
 use indexmap::{IndexMap, IndexSet};
 use snowflake_api::{JsonResult, QueryResult, SnowflakeApi};
-use sqlparser::ast::{DescribeAlias, Statement};
+use sqlparser::{
+    ast::{DescribeAlias, Statement},
+    dialect::SnowflakeDialect,
+};
 
 use crate::{
-    connector::SnowflakeConnector,
+    connector::{SnowflakeConnector, SnowflakeConnectorAuth},
     error::SnowflakeConnectorError,
     resource::{ObjectType, SnowflakeRole, SnowflakeUser},
     util::record::JsonResultExt,
@@ -24,15 +27,26 @@ impl SnowflakeConnector {
             bail!("SnowflakeConnector: Uninitialized!");
         };
 
-        let new_api = Arc::new(SnowflakeApi::with_certificate_auth(
-            &config.account,
-            Some(&config.warehouse),
-            database,
-            schema,
-            &config.user,
-            Some(&config.role),
-            &config.private_key,
-        )?);
+        let new_api = Arc::new(match &config.auth {
+            SnowflakeConnectorAuth::Password(password) => SnowflakeApi::with_password_auth(
+                &config.account,
+                config.warehouse.as_deref(),
+                database,
+                schema,
+                &config.user,
+                config.role.as_deref(),
+                password,
+            )?,
+            SnowflakeConnectorAuth::PrivateKey(private_key) => SnowflakeApi::with_certificate_auth(
+                &config.account,
+                config.warehouse.as_deref(),
+                database,
+                schema,
+                &config.user,
+                config.role.as_deref(),
+                private_key,
+            )?,
+        });
 
         *self.api.lock().await = Some(new_api.clone());
 
@@ -41,7 +55,9 @@ impl SnowflakeConnector {
 
     pub async fn get_ddl(&self, object_type: &str, name: &str) -> Result<Option<GetResourceResponse>, anyhow::Error> {
         let api = self.get_api(None, None).await?;
-        let res = api.exec(&format!("SELECT GET_DDL('{}', '{}');", object_type, name)).await;
+        let res = api
+            .exec(&format!("SELECT GET_DDL('{}', '{}', true);", object_type, name))
+            .await;
         match res {
             Ok(snowflake_api::QueryResult::Arrow(arrow)) => {
                 tracing::warn!("SELECT GET DDL: arrow {:?}", arrow);
@@ -49,18 +65,35 @@ impl SnowflakeConnector {
                 let ddl: StringArray = ddl.to_data().into();
                 let ddl = ddl.value(0);
 
-                // DDLs returned from GET DDL are recursive, so
-                // we'll just crudely pick out the first statement...
+                // DDLs returned from GET_DDL are recursive, so
+                // we only want the first statement.
 
-                let mut ddl: Vec<&str> = ddl.split(";").take(1).collect();
-                let mut first_statement = ddl.remove(0).to_string();
-                first_statement.push_str(";\n");
+                if let Ok(statements) = sqlparser::parser::Parser::new(&SnowflakeDialect)
+                    .try_with_sql(ddl)
+                    .and_then(|mut p| p.parse_statements())
+                {
+                    match statements.first() {
+                        Some(s) => {
+                            return Ok(Some(GetResourceResponse {
+                                resource_definition: s.to_string().into_bytes(),
+                                virt_addr: None,
+                                outputs: None,
+                            }));
+                        }
+                        None => return Ok(None),
+                    }
+                } else {
+                    // we'll just crudely pick out the first statement...
+                    let mut ddl: Vec<&str> = ddl.split(";").take(1).collect();
+                    let mut first_statement = ddl.remove(0).to_string();
+                    first_statement.push_str(";\n");
 
-                return Ok(Some(GetResourceResponse {
-                    resource_definition: first_statement.into_bytes(),
-                    virt_addr: None,
-                    outputs: None,
-                }));
+                    return Ok(Some(GetResourceResponse {
+                        resource_definition: first_statement.into_bytes(),
+                        virt_addr: None,
+                        outputs: None,
+                    }));
+                }
             }
             Ok(snowflake_api::QueryResult::Empty) => {
                 tracing::warn!("SELECT GET DDL: EMPTY????");
@@ -77,11 +110,6 @@ impl SnowflakeConnector {
                 return Err(e.into());
             }
         }
-
-        // if let Some(ddl) = ddl {
-        // } else {
-        //     Ok(None)
-        // }
 
         Ok(None)
     }
@@ -208,6 +236,27 @@ impl SnowflakeConnector {
         }
 
         Ok(tables)
+    }
+
+    pub async fn list_file_formats(
+        api: &SnowflakeApi,
+        database_name: &str,
+        schema_name: &str,
+    ) -> Result<Vec<String>, anyhow::Error> {
+        let res = api
+            .exec(&format!("SHOW FILE FORMATS IN SCHEMA {}.{};", database_name, schema_name))
+            .await?;
+        let mut file_formats = Vec::new();
+        if let QueryResult::Json(json_result) = res {
+            tracing::warn!("SHOW FILE FORMATS: {}", json_result.value);
+            for row in json_result.iter_records()? {
+                let row = row?;
+                let name: String = row.require_as("name")?;
+                file_formats.push(name);
+            }
+        }
+
+        Ok(file_formats)
     }
 
     pub async fn list_users(api: &SnowflakeApi) -> Result<Vec<String>, anyhow::Error> {

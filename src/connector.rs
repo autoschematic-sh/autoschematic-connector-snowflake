@@ -1,10 +1,9 @@
 use std::{
-    env,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, Error};
+use anyhow::Context;
 use async_trait::async_trait;
 use autoschematic_core::{
     connector::{
@@ -13,27 +12,40 @@ use autoschematic_core::{
     },
     connector_op,
     diag::{Diagnostic, DiagnosticPosition, DiagnosticResponse, DiagnosticSeverity, DiagnosticSpan},
-    doc_dispatch, get_resource_response, skeleton,
+    doc_dispatch, get_resource_response,
+    glob::addr_matches_filter,
+    skeleton,
     util::{ron_check_eq, ron_check_syntax},
 };
-use base64::prelude::*;
 use indexmap::IndexMap;
 use snowflake_api::SnowflakeApi;
 use tokio::sync::Mutex;
 
-use crate::{addr::SnowflakeResourceAddress, op::*, resource::*, util};
+use crate::{
+    addr::SnowflakeResourceAddress,
+    config::{load_legacy_env_connector_config, load_snowflake_cli_connector_config},
+    op::*,
+    resource::*,
+    util,
+};
 
 mod op_exec;
 mod plan;
 
-/// Configuration for the Snowflake connector, loaded during init().
+/// Internal config for the Snowflake connector, built during init().
 #[derive(Clone)]
 pub struct SnowflakeConnectorConfig {
     pub account: String,
     pub user: String,
-    pub role: String,
-    pub warehouse: String,
-    pub private_key: String,
+    pub role: Option<String>,
+    pub warehouse: Option<String>,
+    pub auth: SnowflakeConnectorAuth,
+}
+
+#[derive(Clone)]
+pub enum SnowflakeConnectorAuth {
+    Password(String),
+    PrivateKey(String),
 }
 
 pub struct SnowflakeConnector {
@@ -58,7 +70,7 @@ impl PrivilegeTargetKind {
 
 impl SnowflakeConnector {
     async fn current_session_role(&self) -> Option<String> {
-        Some(self.config.lock().await.as_ref()?.role.clone())
+        self.config.lock().await.as_ref()?.role.clone()
     }
 
     fn extend_privilege_plan(
@@ -125,34 +137,10 @@ impl Connector for SnowflakeConnector {
     }
 
     async fn init(&self) -> anyhow::Result<()> {
-        let account = env::var("SF_ACCOUNT").context("SF_ACCOUNT env var not set!")?;
-        let user = env::var("SF_USER").context("SF_USER env var not set!")?;
-        let role = env::var("SF_ROLE").context("SF_ROLE env var not set!")?;
-        let warehouse = env::var("SF_WAREHOUSE").context("SF_WAREHOUSE env var not set!")?;
-        let private_key_base64 = env::var("SF_PRIVATE_KEY_BASE64");
-        let private_key_path = env::var("SF_PRIVATE_KEY_PATH");
-
-        let private_key = match (private_key_base64, private_key_path) {
-            (Ok(_), Ok(_)) => Err(Error::msg(
-                "Ambiguous: Only one of SF_PRIVATE_KEY_BASE64 and SF_PRIVATE_KEY_PATH can be set!",
-            )),
-            (Ok(private_key_base64), Err(_)) => {
-                let private_key = BASE64_STANDARD
-                    .decode(private_key_base64)
-                    .context("Failed to decode SF_PRIVATE_KEY_BASE64")?;
-                Ok(String::from_utf8(private_key).context("SF_PRIVATE_KEY_BASE64 is not valid UTF-8")?)
-            }
-            (Err(_), Ok(private_key_path)) => std::fs::read_to_string(&private_key_path)
-                .with_context(|| format!("Failed to read private key from {}", private_key_path)),
-            (Err(_), Err(_)) => Err(Error::msg("SF_PRIVATE_KEY_BASE64 or SF_PRIVATE_KEY_PATH not set!")),
-        }?;
-
-        let config = SnowflakeConnectorConfig {
-            account,
-            user,
-            role,
-            warehouse,
-            private_key,
+        let config = match load_snowflake_cli_connector_config()? {
+            Some(config) => config,
+            None => load_legacy_env_connector_config()
+                .context("Failed to load Snowflake CLI config and no legacy SF_* credentials were available")?,
         };
 
         *self.config.lock().await = Some(config);
@@ -167,51 +155,68 @@ impl Connector for SnowflakeConnector {
         }
     }
 
-    async fn list(&self, _subpath: &Path) -> Result<Vec<PathBuf>, anyhow::Error> {
+    async fn list(&self, subpath: &Path) -> Result<Vec<PathBuf>, anyhow::Error> {
         let api = self.get_api(None, None).await?;
         let mut results = Vec::new();
 
-        for name in SnowflakeConnector::list_warehouses(&api).await? {
-            results.push(SnowflakeResourceAddress::Warehouse { name }.to_path_buf());
+        if addr_matches_filter(&PathBuf::from("snowflake/warehouses"), subpath) {
+            for name in SnowflakeConnector::list_warehouses(&api).await? {
+                results.push(SnowflakeResourceAddress::Warehouse { name }.to_path_buf());
+            }
         }
 
-        for database in SnowflakeConnector::list_databases(&api).await? {
-            if database == "SNOWFLAKE" {
-                continue;
-            }
+        if addr_matches_filter(&PathBuf::from("snowflake/databases"), subpath) {
+            for database in SnowflakeConnector::list_databases(&api).await? {
+                if database == "SNOWFLAKE" {
+                    continue;
+                }
 
-            results.push(SnowflakeResourceAddress::Database { name: database.clone() }.to_path_buf());
+                results.push(SnowflakeResourceAddress::Database { name: database.clone() }.to_path_buf());
 
-            for schema_name in SnowflakeConnector::list_schemas(&api, &database).await? {
-                results.push(
-                    SnowflakeResourceAddress::Schema {
-                        database: database.clone(),
-                        name: schema_name.clone(),
-                    }
-                    .to_path_buf(),
-                );
-                for table_name in SnowflakeConnector::list_tables(&api, &database, &schema_name).await? {
+                for schema_name in SnowflakeConnector::list_schemas(&api, &database).await? {
                     results.push(
-                        SnowflakeResourceAddress::Table {
+                        SnowflakeResourceAddress::Schema {
                             database: database.clone(),
-                            schema: schema_name.clone(),
-                            name: table_name.clone(),
+                            name: schema_name.clone(),
                         }
                         .to_path_buf(),
                     );
+                    for table_name in SnowflakeConnector::list_tables(&api, &database, &schema_name).await? {
+                        results.push(
+                            SnowflakeResourceAddress::Table {
+                                database: database.clone(),
+                                schema: schema_name.clone(),
+                                name: table_name.clone(),
+                            }
+                            .to_path_buf(),
+                        );
+                    }
                 }
             }
         }
 
-        for name in SnowflakeConnector::list_users(&api).await? {
-            results.push(SnowflakeResourceAddress::User { name }.to_path_buf());
+        if addr_matches_filter(&PathBuf::from("snowflake/users"), subpath) {
+            for name in SnowflakeConnector::list_users(&api).await? {
+                results.push(SnowflakeResourceAddress::User { name }.to_path_buf());
+            }
         }
 
-        for name in SnowflakeConnector::list_roles(&api).await? {
-            results.push(SnowflakeResourceAddress::Role { name }.to_path_buf());
+        if addr_matches_filter(&PathBuf::from("snowflake/roles"), subpath) {
+            for name in SnowflakeConnector::list_roles(&api).await? {
+                results.push(SnowflakeResourceAddress::Role { name }.to_path_buf());
+            }
         }
 
         Ok(results)
+    }
+
+    async fn subpaths(&self) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(vec![
+            "snowflake/users".into(),
+            "snowflake/roles".into(),
+            "snowflake/databases".into(),
+            "snowflake/warehouses".into(),
+        ])
     }
 
     async fn get(&self, addr: &Path) -> Result<Option<GetResourceResponse>, anyhow::Error> {
@@ -224,6 +229,10 @@ impl Connector for SnowflakeConnector {
             }
             SnowflakeResourceAddress::Table { database, schema, name } => {
                 self.get_ddl("TABLE", &format!("{}.{}.{}", database, schema, name)).await
+            }
+            SnowflakeResourceAddress::FileFormat { database, schema, name } => {
+                self.get_ddl("FILE_FORMAT", &format!("{}.{}.{}", database, schema, name))
+                    .await
             }
             SnowflakeResourceAddress::User { name } => {
                 let api = self.get_api(None, None).await?;
